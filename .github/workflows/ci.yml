@@ -2,10 +2,15 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
     branches:
       - "**"
+
+# Never let two production deploys overlap, and never cancel one midway.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   validate:
@@ -84,3 +89,44 @@ jobs:
 
       - name: Build Monorepo
         run: pnpm build
+
+  deploy:
+    name: Deploy to Production VPS
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+
+    # Attach required reviewers to this environment in
+    # Settings -> Environments -> production to gate deploys on approval.
+    environment:
+      name: production
+      url: https://daih.ng
+
+    steps:
+      - name: Open SSH session
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SSH_HOST: ${{ secrets.VPS_HOST }}
+          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # Pin the host key so a hijacked DNS record cannot receive our key.
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy
+        env:
+          SSH_USER: ${{ secrets.VPS_USER }}
+          SSH_HOST: ${{ secrets.VPS_HOST }}
+          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          APP_DIR: ${{ secrets.VPS_APP_DIR || '/var/www/daih' }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
+              -o BatchMode=yes -o ServerAliveInterval=30 \
+              "$SSH_USER@$SSH_HOST" \
+              "APP_DIR='$APP_DIR' bash '$APP_DIR/scripts/deploy.sh' '${{ github.sha }}'"
+
+      - name: Revoke key material
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
