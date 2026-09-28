@@ -169,17 +169,19 @@ cd /var/www/daih
 pnpm build            # ~1-3 minutes on a 2 vCPU box
 npm install -g pm2
 
-pm2 start "node apps/api/dist/server.js"          --name daih-api
-pm2 start "pnpm --filter @daih/api run worker"    --name daih-worker
-pm2 start "pnpm --filter @daih/web start"         --name daih-web
-pm2 start "pnpm --filter @daih/customer-pwa start" --name daih-pwa
-pm2 start "pnpm --filter @daih/reception-app start" --name daih-kiosk
-pm2 start "pnpm --filter @daih/admin-portal start" --name daih-admin
-
-pm2 save && pm2 startup
+pm2 start ecosystem.config.cjs
+pm2 save && pm2 startup   # run the command pm2 startup prints
 ```
 
-**Verify:** `pm2 list` shows six processes `online`, and `curl -s localhost:4000/api/v1/catalogue/resources` returns JSON rather than a connection error.
+`ecosystem.config.cjs` defines all six processes declaratively, so the same
+file drives the first boot, every later redeploy (`pm2 reload`) and recovery
+after a reboot. Every process runs a compiled artifact — `dist/server.js`,
+`dist/jobs/worker.js`, and Next's own binary — never `tsx watch`, which keeps
+a TypeScript compiler resident and restarts on any file touch.
+
+**Verify:** `pm2 list` shows six processes `online`, and
+`curl -s localhost:4000/api/v1/catalogue/resources` returns JSON rather than a
+connection error.
 
 ---
 
@@ -211,6 +213,82 @@ https://api.daih.ng/api/v1/payments/webhook
 
 ---
 
+## Phase 8.5 — Automatic deploys on merge
+
+Once the first deploy is verified, every merge to `master` can redeploy itself:
+CI runs lint, typecheck, tests and build, and only on success does it SSH in and
+run `scripts/deploy.sh`.
+
+### On the server — create a deploy key
+
+```bash
+# As the user the deploy will run as (root, or a dedicated `deploy` user)
+ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N "" -C "github-actions-daih"
+cat ~/.ssh/github_deploy.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+cat ~/.ssh/github_deploy      # the PRIVATE key — copy this into GitHub
+```
+
+The server also needs read access to the repository. Use a **repository deploy
+key** rather than a personal token, so revoking the server never disturbs anyone's
+own account:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/repo_readonly -N "" -C "daih-vps"
+cat ~/.ssh/repo_readonly.pub  # add under Repo -> Settings -> Deploy keys (read-only)
+
+cd /var/www/daih
+git remote set-url origin git@github.com:E310-Tech-Team/DAIH-main.git
+```
+
+### On GitHub — add the secrets
+
+Settings → Secrets and variables → Actions:
+
+| Secret        | Value                                                                     |
+| ------------- | ------------------------------------------------------------------------- |
+| `VPS_HOST`    | your VPS IP or hostname                                                   |
+| `VPS_USER`    | the SSH user the deploy runs as                                           |
+| `VPS_SSH_KEY` | the **private** key printed above, whole file including header and footer |
+| `VPS_PORT`    | optional, defaults to `22`                                                |
+| `VPS_APP_DIR` | optional, defaults to `/var/www/daih`                                     |
+
+### Optional but recommended — require approval
+
+Settings → Environments → **production** → add yourself under _Required
+reviewers_. Deploys then pause for a click instead of shipping on merge. Worth
+having while the programme is new.
+
+### What a deploy does
+
+1. Dumps the database to `/var/backups/daih/` (keeps the last 20)
+2. `git reset --hard` to the merged commit
+3. `pnpm install --frozen-lockfile`
+4. `prisma migrate deploy`
+5. Idempotent seeds: email templates, loyalty settings
+6. `pnpm build`
+7. `pm2 reload ecosystem.config.cjs` — graceful, no dropped requests
+8. Health-checks the API and all four frontends
+9. **Rolls the code back automatically** if the health check fails
+
+### The limit you must understand
+
+**Rollback reverts code, not the database.** Migrations are forward-only. If a
+migration applies and the release is then rolled back, the schema is left ahead
+of the code. The script prints the path of the dump it took; restoring it is a
+deliberate, manual decision:
+
+```bash
+gunzip -c /var/backups/daih/daih-<timestamp>-<sha>.sql.gz \
+  | docker exec -i daih-postgres psql -U postgres -d daih_db
+```
+
+Because of this, treat any PR containing a migration as a manual deploy: merge it
+when you can watch, not on a Friday evening.
+
+---
+
 ## Phase 9 — Smoke test before announcing
 
 Run these against the live site, in order. Each depends on the previous.
@@ -232,13 +310,14 @@ Do **1 through 4 with a real card and a small amount** before opening to custome
 
 ## Rollback
 
-Nothing here is destructive until Phase 5. If Phase 6 or later fails:
+Automated deploys roll the code back on their own when the health check fails.
+To roll back by hand:
 
 ```bash
-pm2 delete all
-cd /var/www/daih && git checkout <previous-good-commit>
+cd /var/www/daih
+git reset --hard <previous-good-commit>
 pnpm install --frozen-lockfile && pnpm build
-pm2 resurrect
+pm2 reload ecosystem.config.cjs --update-env
 ```
 
 The database is untouched by a code rollback. If a **migration** must be undone, restore from a dump — take one before every future deploy:
