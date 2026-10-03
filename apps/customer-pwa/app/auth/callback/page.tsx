@@ -3,6 +3,7 @@
 import React, { useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth, apiClient } from "@daih/api-client";
+import { getSafeRedirectUrl } from "@daih/types";
 import { Loader2 } from "lucide-react";
 
 function CallbackHandler() {
@@ -11,8 +12,10 @@ function CallbackHandler() {
   const { setSession, refreshSession } = useAuth();
 
   useEffect(() => {
+    const code = searchParams?.get("code");
     const token = searchParams?.get("token");
-    const destination = searchParams?.get("destination") || "/dashboard";
+    const rawDestination = searchParams?.get("destination") || "/dashboard";
+    const destination = getSafeRedirectUrl(rawDestination, "/dashboard");
     const error = searchParams?.get("error");
 
     if (error) {
@@ -20,25 +23,67 @@ function CallbackHandler() {
       return;
     }
 
+    if (code) {
+      // 1. Pull PKCE code_verifier from sessionStorage and immediately clear it
+      let codeVerifier: string | undefined;
+      try {
+        const stored = sessionStorage.getItem("daih_pkce_verifier");
+        if (stored) {
+          codeVerifier = stored;
+          sessionStorage.removeItem("daih_pkce_verifier");
+        }
+      } catch {
+        // Ignore storage access error
+      }
+
+      // 2. Exchange authorization code + PKCE verifier for tokens
+      apiClient.auth
+        .exchangeOAuthCode({ code, codeVerifier })
+        .then((res) => {
+          if (res.accessToken && res.user) {
+            setSession(res.accessToken, res.user);
+          }
+          // 3. Immediately replace history state so code is removed from URL and referrer
+          if (typeof window !== "undefined") {
+            window.history.replaceState({}, "", destination);
+          }
+          router.replace(destination);
+        })
+        .catch((err: any) => {
+          router.replace(
+            `/login?error=${encodeURIComponent(
+              err?.message ||
+                "Authentication code exchange failed. Please sign in again.",
+            )}`,
+          );
+        });
+      return;
+    }
+
     if (token) {
       apiClient.setAccessToken(token);
-      // Fetch user profile and sync state
       apiClient.auth
         .getProfile()
         .then((user) => {
           setSession(token, user);
+          if (typeof window !== "undefined") {
+            window.history.replaceState({}, "", destination);
+          }
           router.replace(destination);
         })
         .catch(() => {
-          // If direct profile fetch fails, try session refresh
           refreshSession()
-            .then(() => router.replace(destination))
+            .then(() => {
+              if (typeof window !== "undefined") {
+                window.history.replaceState({}, "", destination);
+              }
+              router.replace(destination);
+            })
             .catch(() =>
               router.replace("/login?error=Session+synchronization+failed"),
             );
         });
     } else {
-      // No token directly in query, check for refresh cookie via refreshSession
       refreshSession()
         .then((user) => {
           if (user) {

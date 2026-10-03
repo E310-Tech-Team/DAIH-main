@@ -234,13 +234,18 @@ docker compose up -d
 
 ### Step 5.3: Run Database Migrations & Super Admin Seed
 
+> [!IMPORTANT]
+> Always deploy migrations using `prisma:migrate:deploy`. Destructive schema synchronization (`prisma db push`) is strictly prohibited in staging and production environments to preserve transactional financial data, prevent table or column drops, and enforce migration history integrity.
+
 ```bash
 cd /var/www/daih
 pnpm install
-cd apps/api
 
-# Push schema and seed initial Super Admin
-npx prisma db push --schema=src/db/prisma/schema.prisma
+# Apply versioned Prisma migrations deterministically
+pnpm --filter @daih/api prisma:migrate:deploy
+
+# Seed initial Super Admin
+cd apps/api
 npx tsx src/scripts/seed-super-admin.ts
 ```
 

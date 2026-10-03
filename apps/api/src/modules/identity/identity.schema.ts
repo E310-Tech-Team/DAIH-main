@@ -249,3 +249,29 @@ export const policyConsentSchema = z.object({
     message: "You must accept the terms of service and privacy policy",
   }),
 });
+
+export const oauthExchangeSchema = z.object({
+  code: z.string().trim().min(1, "Authorization code is required"),
+  codeVerifier: z.string().trim().optional(),
+  code_verifier: z.string().trim().optional(),
+});
+
+export const deactivateAccountSchema = z.object({
+  password: z.string().optional(),
+  otp: z.string().optional(),
+  forfeitCoinsConsent: z.boolean().default(true),
+  reason: z
+    .string()
+    .trim()
+    .optional()
+    .transform((val) => (val ? sanitizeString(val) : val)),
+});
+
+export const reactivateAccountSchema = z.object({
+  userId: z.string().uuid("Invalid user ID"),
+  reason: z
+    .string()
+    .trim()
+    .min(10, "Reason must be at least 10 characters long")
+    .transform(sanitizeString),
+});

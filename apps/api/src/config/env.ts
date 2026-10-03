@@ -86,16 +86,34 @@ export const config = {
     customer: process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3001",
     admin: process.env.FRONTEND_ADMIN_URL || "http://localhost:3003",
     web: process.env.FRONTEND_WEB_URL || "http://localhost:3000",
+    reception: process.env.FRONTEND_RECEPTION_URL || "http://localhost:3002",
   },
   cors: {
-    allowedOrigins: [
-      ...(process.env.ALLOWED_ORIGINS
-        ? process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim())
-        : []),
-      process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3001",
-      process.env.FRONTEND_ADMIN_URL || "http://localhost:3003",
-      process.env.FRONTEND_WEB_URL || "http://localhost:3000",
-    ].filter(Boolean),
+    allowedOrigins: Array.from(
+      new Set(
+        [
+          ...(process.env.NODE_ENV === "production"
+            ? [
+                "https://daih.ng",
+                "https://app.daih.ng",
+                "https://admin.daih.ng",
+                "https://reception.daih.ng",
+              ]
+            : []),
+          ...(process.env.CORS_ALLOWED_ORIGINS
+            ? process.env.CORS_ALLOWED_ORIGINS.split(",").map((s) => s.trim())
+            : process.env.ALLOWED_ORIGINS
+              ? process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim())
+              : []),
+          process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3001",
+          process.env.FRONTEND_ADMIN_URL || "http://localhost:3003",
+          process.env.FRONTEND_WEB_URL || "http://localhost:3000",
+          process.env.FRONTEND_RECEPTION_URL || "http://localhost:3002",
+        ]
+          .filter(Boolean)
+          .map((o) => o.replace(/\/$/, "").toLowerCase()),
+      ),
+    ),
   },
   email: {
     provider: process.env.EMAIL_PROVIDER || "auto", // 'auto' | 'resend' | 'zeptomail' | 'mock'
@@ -160,6 +178,15 @@ export const config = {
     enableDiagnosticIpEndpoint:
       process.env.ENABLE_DIAGNOSTIC_IP_ENDPOINT === "true",
   },
+  payments: {
+    minChargeNgn: parseFloat(process.env.PAYSTACK_MIN_CHARGE_NGN || "100.00"),
+  },
+  billing: {
+    vatRate: parseFloat(process.env.BILLING_VAT_RATE || "0.075"),
+  },
+  features: {
+    enableCoinRedemption: process.env.ENABLE_COIN_REDEMPTION === "true",
+  },
 };
 
 /**
@@ -171,6 +198,7 @@ export function validateProductionConfig(): void {
       "dev-secret-key-12345678901234567890",
       "dev-refresh-secret-12345678901234567890",
       "dev-token-encryption-key-12345678901234567890",
+      "dev-qr-signing-key-1234567890",
     ];
 
     if (
@@ -203,5 +231,44 @@ export function validateProductionConfig(): void {
         "FATAL SECURITY ERROR: TOKEN_ENCRYPTION_KEY must be explicitly set, independent from JWT_SECRET, and at least 32 characters long in production.",
       );
     }
+
+    if (
+      !process.env.QR_SIGNING_SECRET ||
+      defaultSecrets.includes(config.qrSigningSecret) ||
+      config.qrSigningSecret.length < 32 ||
+      config.qrSigningSecret === config.jwt.secret
+    ) {
+      throw new Error(
+        "FATAL SECURITY ERROR: QR_SIGNING_SECRET must be explicitly set, independent from JWT_SECRET, and at least 32 characters long in production.",
+      );
+    }
   }
+}
+
+export function isAllowedOrigin(origin?: string): boolean {
+  if (!origin) return false;
+  const cleanOrigin = origin.replace(/\/$/, "").toLowerCase();
+
+  const isExplicitlyAllowed = config.cors.allowedOrigins.some(
+    (allowed) => allowed.replace(/\/$/, "").toLowerCase() === cleanOrigin,
+  );
+  if (isExplicitlyAllowed) return true;
+
+  if (config.env !== "production") {
+    const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(
+      cleanOrigin,
+    );
+    const configuredTunnel = process.env.CLOUDFLARE_TUNNEL_URL?.replace(
+      /\/$/,
+      "",
+    ).toLowerCase();
+    const isConfiguredTunnel = configuredTunnel
+      ? cleanOrigin === configuredTunnel
+      : false;
+    if (isLocalhost || isConfiguredTunnel) {
+      return true;
+    }
+  }
+
+  return false;
 }

@@ -128,6 +128,13 @@ export class SessionService {
       throw new Error("INVALID_REFRESH_TOKEN");
     }
 
+    if (session.user && (session.user as any).deactivatedAt) {
+      const error: any = new Error("ACCOUNT_DEACTIVATED");
+      error.code = "ACCOUNT_DEACTIVATED";
+      error.statusCode = 403;
+      throw error;
+    }
+
     // If session is already marked revoked -> Check grace window for concurrent requests
     if (session.isRevoked) {
       const GRACE_WINDOW_MS = config.jwt.refreshGraceWindowMs || 30000;

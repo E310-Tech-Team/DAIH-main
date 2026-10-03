@@ -22,11 +22,11 @@ export class AccessController {
         return;
       }
 
-      // Enforce ownership or staff role
+      // Enforce strict booking ownership: Pass retrieval is customer-facing and restricted to the booking owner.
+      // Staff must use the verify-qr scanner to inspect passes presented by visitors.
       const isOwner = booking.userId === req.user?.id;
-      const isStaff = req.user?.role && req.user.role !== UserRole.CUSTOMER;
 
-      if (!isOwner && !isStaff) {
+      if (!isOwner) {
         res.status(403).json({
           code: "FORBIDDEN",
           message: "You are not authorized to view this booking access pass",
@@ -34,19 +34,17 @@ export class AccessController {
         return;
       }
 
-      const isConfirmed = [
+      const isActiveState = [
         BookingState.CONFIRMED,
         BookingState.ACTIVE,
         BookingState.CHECKED_IN,
-        BookingState.CHECKED_OUT,
-        BookingState.COMPLETED,
       ].includes(booking.state as BookingState);
 
-      if (!isConfirmed || !booking.qrToken) {
-        res.status(403).json({
-          code: "PAYMENT_REQUIRED",
+      if (!isActiveState || !booking.qrToken) {
+        res.status(400).json({
+          code: "BOOKING_NOT_ACTIVE",
           message:
-            "QR code access pass is only generated after booking payment is confirmed",
+            "QR code access pass is only available for active, confirmed bookings",
         });
         return;
       }

@@ -100,6 +100,20 @@ export const authenticate = async (
       sessionId: payload.sessionId,
     };
 
+    // Verify user is not deactivated (Immediate Access Token Termination)
+    const userRecord = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { deactivatedAt: true },
+    });
+    if (userRecord?.deactivatedAt) {
+      res.status(403).json({
+        code: "ACCOUNT_DEACTIVATED",
+        message:
+          "Your account has been deactivated. Please contact support to reactivate your account.",
+      });
+      return;
+    }
+
     // Ensure authenticated user data is never cached by intermediate proxies or shared CDN caches
     res.set("Cache-Control", "private, no-cache, no-store, must-revalidate");
     res.set("Pragma", "no-cache");

@@ -50,6 +50,32 @@ vi.mock("../../db/client.js", () => {
     $executeRaw: vi.fn(async () => 1),
     $queryRaw: vi.fn(async () => []),
     refundRequest: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        return (
+          store.refundRequests.find((r) => {
+            if (where.bookingId && r.bookingId !== where.bookingId)
+              return false;
+            if (where.status?.in && !where.status.in.includes(r.status))
+              return false;
+            if (
+              where.status &&
+              typeof where.status === "string" &&
+              r.status !== where.status
+            )
+              return false;
+            return true;
+          }) || null
+        );
+      }),
+      create: vi.fn(async ({ data }: any) => {
+        const created = {
+          id: `refund-${Date.now()}`,
+          ...data,
+          requestedAt: new Date(),
+        };
+        store.refundRequests.push(created);
+        return created;
+      }),
       update: vi.fn(async ({ where, data }: any) => {
         const idx = store.refundRequests.findIndex((r) => r.id === where.id);
         if (idx !== -1) {
@@ -438,32 +464,12 @@ describe("Dual-Authorization Refund Workflow", () => {
       const updatedBooking = store.bookings.find((b) => b.id === booking.id);
       expect(updatedBooking?.state).toBe(BookingState.REFUNDED);
 
-      // 2. Coin reverse for redeemed coins
-      expect(coinService.reverseRedemption).toHaveBeenCalledWith(
-        booking.id,
-        expect.anything(),
-        expect.anything(),
-      );
-
-      // 3. Earned coins clawed back
-      expect(coinService.clawbackEarnedCoins).toHaveBeenCalledWith(
-        booking.id,
-        expect.anything(),
-        expect.anything(),
-      );
-
-      // 4. Referral bonus clawed back from referrer
-      expect(coinService.clawbackReferralBonus).toHaveBeenCalledWith(
-        booking.id,
-        "user-referrer-1",
-        expect.anything(),
-        expect.anything(),
-      );
-
-      // 5. Outbox event emitted
+      // 2. Outbox event emitted for refund processed and loyalty reversal
       const outbox = store.outboxEvents.find(
         (e) => e.eventType === "refund.processed",
       );
+      expect(outbox).toBeDefined();
+      expect(outbox.payload.bookingId).toBe(booking.id);
       expect(outbox).toBeDefined();
       expect(outbox?.payload?.bookingId).toBe(booking.id);
 

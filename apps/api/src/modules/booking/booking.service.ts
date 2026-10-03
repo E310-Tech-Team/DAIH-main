@@ -34,6 +34,9 @@ import { generateSignedQrToken } from "../access/qr-token.util.js";
 import { accessService } from "../access/access.service.js";
 import { discountService } from "../discounts/discount.service.js";
 import { loyaltyService } from "../loyalty/loyalty.service.js";
+import { Decimal } from "@prisma/client/runtime/library";
+import { HoldStatus, CoinLedgerAction } from "@prisma/client";
+import { config } from "../../config/env.js";
 
 export class BookingService {
   constructor(private repo: BookingRepository = bookingRepository) {}
@@ -455,6 +458,7 @@ export class BookingService {
   async createHold(userId: string, input: CreateHoldInput) {
     const start = new Date(input.startTime);
     const end = new Date(input.endTime);
+    const quantity = input.quantity ? Number(input.quantity) : 1;
 
     try {
       // Perform check and hold insertion inside an interactive transaction with row-level lock
@@ -480,8 +484,22 @@ export class BookingService {
             throw error;
           }
 
-          // Lock resource row in DB to serialize concurrency checks for this resource
-          await tx.$queryRaw`SELECT id FROM "facility_resources" WHERE id = ${resource.id} FOR UPDATE`;
+          // 1. Enforce category bounds
+          const isPooled = ["HOT_DESK", "FLEX_DESK"].includes(
+            resource.category,
+          );
+          const maxAllowed = isPooled ? resource.capacity : 1;
+          if (quantity > maxAllowed) {
+            const error: any = new Error(
+              `Maximum quantity for ${resource.name} is ${maxAllowed}`,
+            );
+            error.statusCode = 400;
+            error.code = "INVALID_QUANTITY";
+            throw error;
+          }
+
+          // 2. Lock resource row in DB to serialize concurrency checks for this resource
+          await tx.$queryRaw`SELECT id, capacity FROM "facility_resources" WHERE id = ${resource.id} FOR UPDATE`;
 
           // Check blackouts
           const isBlackedOut = (resource.blackouts || []).some((b) => {
@@ -500,7 +518,7 @@ export class BookingService {
             throw error;
           }
 
-          // Check overlapping active reservations vs capacity
+          // Check overlapping active reservations vs capacity (accounting for requested quantity)
           const activeCount = await this.repo.countActiveOverlappingBookings(
             tx,
             resource.id,
@@ -508,7 +526,7 @@ export class BookingService {
             end,
           );
 
-          if (activeCount >= resource.capacity) {
+          if (activeCount + quantity > resource.capacity) {
             const error: any = new Error(
               "Workspace capacity is fully reserved for the selected time range",
             );
@@ -517,40 +535,57 @@ export class BookingService {
             throw error;
           }
 
-          // Calculate price
-          let calculatedPrice = 4000;
+          // 3. Authoritative server pricing engine & duration calculation
+          let unitPrice = 4000;
           let currency = "NGN";
+          let durationUnits = 1;
 
           if (input.planId) {
             const plan = resource.pricing.find((p) => p.id === input.planId);
             if (plan) {
-              calculatedPrice = Number(plan.price);
+              unitPrice = Number(plan.price);
               currency = plan.currency;
+              if (plan.durationHours && plan.durationHours > 0) {
+                const durationHours = Math.max(
+                  1,
+                  Math.ceil(
+                    (end.getTime() - start.getTime()) / (1000 * 60 * 60),
+                  ),
+                );
+                durationUnits = Math.ceil(durationHours / plan.durationHours);
+              } else if (plan.durationDays && plan.durationDays > 0) {
+                const durationDays = Math.max(
+                  1,
+                  Math.ceil(
+                    (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24),
+                  ),
+                );
+                durationUnits = Math.ceil(durationDays / plan.durationDays);
+              }
             }
           } else if (resource.pricing.length > 0) {
-            calculatedPrice = Number(resource.pricing[0].price);
-            currency = resource.pricing[0].currency;
+            const plan = resource.pricing[0];
+            unitPrice = Number(plan.price);
+            currency = plan.currency;
+            if (plan.durationHours && plan.durationHours > 0) {
+              const durationHours = Math.max(
+                1,
+                Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60)),
+              );
+              durationUnits = Math.ceil(durationHours / plan.durationHours);
+            }
           }
+
+          const baseSubtotal = new Decimal(unitPrice)
+            .mul(quantity)
+            .mul(durationUnits);
+          const calculatedPrice = baseSubtotal.toNumber();
 
           const now = new Date();
           const holdExpiresAt = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes hold
           const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
           const randomSuffix = Math.floor(10000 + Math.random() * 90000);
           const reference = `DAIH-BK-${datePart}-${randomSuffix}`;
-
-          // Create base hold
-          const created = await this.repo.createHold(tx, {
-            reference,
-            resourceId: resource.id,
-            userId,
-            startTime: start,
-            endTime: end,
-            totalAmount: calculatedPrice,
-            originalAmount: calculatedPrice,
-            discountAmount: 0,
-            currency,
-            holdExpiresAt,
-          });
 
           // Fetch user details for domain matching
           const user = await tx.user.findUnique({
@@ -562,7 +597,7 @@ export class BookingService {
           const discountResult = await discountService.applyDiscountToHoldTx(
             tx,
             {
-              bookingId: created.id,
+              bookingId: "temp",
               userId,
               userEmail: user?.email,
               resourceId: resource.id,
@@ -572,19 +607,316 @@ export class BookingService {
             },
           );
 
-          if (discountResult.discountAmount > 0 || discountResult.discountId) {
+          const grossTotal = new Decimal(discountResult.finalAmount);
+
+          // 4. Split-tender coin redemption lifecycle
+          const coinsToRedeemInput = input.coinsToRedeem
+            ? new Decimal(input.coinsToRedeem)
+            : new Decimal(0);
+          const redeemAll = Boolean(input.redeemAll);
+
+          if (
+            !config.features.enableCoinRedemption &&
+            (coinsToRedeemInput.greaterThan(0) || redeemAll)
+          ) {
+            const error: any = new Error(
+              "PeeDee Coin redemption is currently disabled",
+            );
+            error.statusCode = 400;
+            error.code = "COIN_REDEMPTION_DISABLED";
+            throw error;
+          }
+
+          let coinsRedeemed = new Decimal(0);
+          let coinTenderAmount = new Decimal(0);
+          let cashDue = new Decimal(grossTotal);
+          let coinConversionRate = new Decimal(1.0);
+          let currentCoinBalance = new Decimal(0);
+
+          if (
+            config.features.enableCoinRedemption &&
+            (coinsToRedeemInput.greaterThan(0) || redeemAll)
+          ) {
+            // Lock coin_balances row
+            await tx.$executeRaw`
+              INSERT INTO "coin_balances" ("userId", "balance", "lifetimeEarned", "lifetimeBurned", "version", "updatedAt")
+              VALUES (${userId}, 0, 0, 0, 0, NOW())
+              ON CONFLICT ("userId") DO NOTHING;
+            `;
+
+            const rows = await tx.$queryRaw<Array<{ balance: any }>>`
+              SELECT "balance" FROM "coin_balances" WHERE "userId" = ${userId} FOR UPDATE;
+            `;
+            currentCoinBalance = new Decimal(rows[0]?.balance || 0);
+
+            const activeHolds = await tx.coinHold.findMany({
+              where: {
+                userId,
+                status: HoldStatus.ACTIVE,
+                expiresAt: { gt: now },
+              },
+            });
+            const heldSum = activeHolds.reduce(
+              (sum, h) => sum.plus(new Decimal(h.amount)),
+              new Decimal(0),
+            );
+            const spendable = Decimal.max(0, currentCoinBalance.minus(heldSum));
+
+            const loyaltySetting = await tx.loyaltySetting.findFirst();
+
+            if (loyaltySetting) {
+              if (
+                loyaltySetting.isProgramActive === false ||
+                loyaltySetting.isRedemptionEnabled === false
+              ) {
+                const error: any = new Error(
+                  "PD Coin redemption is currently disabled by administrator",
+                );
+                error.statusCode = 400;
+                error.code = "REDEMPTION_DISABLED";
+                throw error;
+              }
+
+              if (
+                loyaltySetting.redemptionRateCoins &&
+                loyaltySetting.redemptionRateNgn
+              ) {
+                const rateNgn = new Decimal(loyaltySetting.redemptionRateNgn);
+                const rateCoins = new Decimal(
+                  loyaltySetting.redemptionRateCoins,
+                );
+                if (rateCoins.greaterThan(0)) {
+                  coinConversionRate = rateNgn.div(rateCoins);
+                }
+              }
+            }
+
+            const paystackMinCharge = new Decimal(
+              config.payments.minChargeNgn || 100.0,
+            );
+
+            // Enforce admin-configured maxDiscountPercent (defaults to 50% if not set)
+            const maxDiscountPercent =
+              loyaltySetting && loyaltySetting.maxDiscountPercent != null
+                ? Number(loyaltySetting.maxDiscountPercent)
+                : 50;
+
+            const maxAllowedDiscountNgn = grossTotal
+              .mul(maxDiscountPercent)
+              .div(100)
+              .toDecimalPlaces(2, Decimal.ROUND_FLOOR);
+
+            const maxCoinsAllowedByPolicy = maxAllowedDiscountNgn
+              .div(coinConversionRate)
+              .toDecimalPlaces(2, Decimal.ROUND_FLOOR);
+
+            // Minimum coins threshold from loyalty settings if configured
+            const minCoinsThreshold =
+              loyaltySetting && loyaltySetting.minCoinsToRedeem != null
+                ? new Decimal(loyaltySetting.minCoinsToRedeem)
+                : new Decimal("0.01");
+
+            if (
+              maxDiscountPercent >= 100 &&
+              (redeemAll ||
+                coinsToRedeemInput
+                  .mul(coinConversionRate)
+                  .greaterThanOrEqualTo(grossTotal))
+            ) {
+              // 100% Coin Coverage Path (strictly permitted only when maxDiscountPercent is 100%)
+              const requiredCoins = grossTotal
+                .div(coinConversionRate)
+                .toDecimalPlaces(2, Decimal.ROUND_CEIL);
+              if (spendable.lessThan(requiredCoins)) {
+                const error: any = new Error(
+                  `Insufficient spendable PeeDee coins for full coverage. Spendable: ${spendable.toFixed(2)}, Required: ${requiredCoins.toFixed(2)}`,
+                );
+                error.statusCode = 400;
+                error.code = "INSUFFICIENT_COINS";
+                throw error;
+              }
+              coinsRedeemed = requiredCoins;
+              coinTenderAmount = grossTotal;
+              cashDue = new Decimal(0);
+            } else {
+              // Partial Redemption Path (or when maxDiscountPercent caps coin coverage below 100%)
+              const maxPartialCoins = Decimal.max(
+                0,
+                grossTotal
+                  .minus(paystackMinCharge)
+                  .div(coinConversionRate)
+                  .toDecimalPlaces(2, Decimal.ROUND_FLOOR),
+              );
+
+              // Cap allowable coins by both policy percentage and Paystack minimum gateway charge
+              const effectiveMaxCoins = Decimal.min(
+                maxCoinsAllowedByPolicy,
+                maxPartialCoins,
+              );
+
+              if (effectiveMaxCoins.lessThan(new Decimal("0.01"))) {
+                const error: any = new Error(
+                  "This booking amount cannot use partial coin redemption because it leaves less than the minimum required gateway charge. Please pay in full via card.",
+                );
+                error.statusCode = 400;
+                error.code = "SUB_MINIMUM_CASH_DUE";
+                throw error;
+              }
+
+              // Determine target coins to redeem
+              let targetCoins = coinsToRedeemInput;
+              if (redeemAll) {
+                targetCoins = Decimal.min(spendable, effectiveMaxCoins);
+              } else if (
+                coinsToRedeemInput.greaterThan(maxCoinsAllowedByPolicy)
+              ) {
+                const error: any = new Error(
+                  `PeeDee Coins can only cover up to ${maxDiscountPercent}% of this booking (maximum ${maxCoinsAllowedByPolicy.toFixed(2)} PDC, equivalent to ₦${maxAllowedDiscountNgn.toFixed(2)}). Please adjust coins or pay in full via card.`,
+                );
+                error.statusCode = 400;
+                error.code = "EXCEEDS_MAX_COIN_DISCOUNT";
+                throw error;
+              } else if (coinsToRedeemInput.greaterThan(maxPartialCoins)) {
+                const error: any = new Error(
+                  "Redemption leaves less than ₦100.00 cash due for card processing. Please reduce coins redeemed.",
+                );
+                error.statusCode = 400;
+                error.code = "SUB_MINIMUM_CASH_DUE";
+                throw error;
+              }
+
+              if (targetCoins.lessThan(minCoinsThreshold)) {
+                const error: any = new Error(
+                  `Minimum redemption is ${minCoinsThreshold.toFixed(2)} PDC`,
+                );
+                error.statusCode = 400;
+                error.code = "INVALID_COIN_AMOUNT";
+                throw error;
+              }
+
+              if (targetCoins.greaterThan(spendable)) {
+                const error: any = new Error(
+                  `Insufficient spendable PeeDee coins. Available: ${spendable.toFixed(2)}, Requested: ${targetCoins.toFixed(2)}`,
+                );
+                error.statusCode = 400;
+                error.code = "INSUFFICIENT_COINS";
+                throw error;
+              }
+
+              coinsRedeemed = targetCoins.toDecimalPlaces(
+                2,
+                Decimal.ROUND_DOWN,
+              );
+              coinTenderAmount = coinsRedeemed
+                .mul(coinConversionRate)
+                .toDecimalPlaces(2, Decimal.ROUND_DOWN);
+              cashDue = grossTotal.minus(coinTenderAmount);
+            }
+          }
+
+          // 5. Create base hold respecting global lock order
+          const created = await this.repo.createHold(tx, {
+            reference,
+            resourceId: resource.id,
+            userId,
+            startTime: start,
+            endTime: end,
+            quantity,
+            totalAmount: grossTotal,
+            cashDue,
+            coinsRedeemed,
+            coinTenderAmount,
+            conversionRateSnapshot: coinConversionRate,
+            originalAmount: calculatedPrice,
+            discountAmount: discountResult.discountAmount,
+            discountId: discountResult.discountId,
+            discountCode: discountResult.discountCode,
+            currency,
+            holdExpiresAt,
+          });
+
+          // Insert coin_holds row if coins redeemed
+          if (coinsRedeemed.greaterThan(0)) {
+            await tx.coinHold.create({
+              data: {
+                userId,
+                bookingId: created.id,
+                amount: coinsRedeemed,
+                nairaValue: coinTenderAmount,
+                status: HoldStatus.ACTIVE,
+                expiresAt: holdExpiresAt,
+              },
+            });
+          }
+
+          // 6. Zero-Cash Instant Confirmation Path
+          if (cashDue.isZero()) {
+            const qrToken = generateSignedQrToken({
+              bookingId: created.id,
+              reference: created.reference,
+              userId: created.userId,
+              startTime: created.startTime.toISOString(),
+              endTime: created.endTime.toISOString(),
+              issuedAt: Date.now(),
+            });
             await tx.booking.update({
               where: { id: created.id },
               data: {
-                totalAmount: discountResult.finalAmount,
-                discountAmount: discountResult.discountAmount,
-                discountId: discountResult.discountId,
-                discountCode: discountResult.discountCode,
+                state: BookingState.CONFIRMED,
+                qrToken,
+                holdExpiresAt: null,
               },
             });
-            created.totalAmount = discountResult.finalAmount as any;
-            (created as any).discountAmount = discountResult.discountAmount;
-            (created as any).discountCode = discountResult.discountCode;
+            created.state = BookingState.CONFIRMED;
+            (created as any).qrToken = qrToken;
+
+            if (coinsRedeemed.greaterThan(0)) {
+              await tx.coinHold.update({
+                where: { bookingId: created.id },
+                data: { status: HoldStatus.BURNED },
+              });
+
+              const newBalance = currentCoinBalance.minus(coinsRedeemed);
+              await tx.coinBalance.update({
+                where: { userId },
+                data: {
+                  balance: newBalance,
+                  lifetimeBurned: { increment: coinsRedeemed },
+                },
+              });
+
+              await tx.coinLedgerEntry.create({
+                data: {
+                  userId,
+                  action: CoinLedgerAction.HOLD_BURNED,
+                  amount: coinsRedeemed.negated(),
+                  balanceAfter: newBalance,
+                  referenceType: "BOOKING",
+                  referenceId: created.id,
+                  idempotencyKey: `burn_booking_${created.id}`,
+                  metadata: {
+                    bookingId: created.id,
+                    reason: "Zero-cash instant confirmation",
+                  },
+                },
+              });
+            }
+
+            // Record confirmation outbox event
+            await outboxService.recordEvent(
+              {
+                eventType: "booking.confirmed",
+                aggregateType: "Booking",
+                aggregateId: created.id,
+                payload: {
+                  bookingId: created.id,
+                  reference: created.reference,
+                  qrToken,
+                  customerEmail: user?.email,
+                },
+              },
+              tx,
+            );
           }
 
           return created;
@@ -595,8 +927,10 @@ export class BookingService {
         },
       );
 
-      // Schedule BullMQ delayed hold expiration job
-      await scheduleHoldExpiry(booking.id, 10 * 60 * 1000);
+      // Only schedule delayed hold expiration job if cash payment is pending
+      if (!new Decimal(booking.cashDue || 0).isZero()) {
+        await scheduleHoldExpiry(booking.id, 10 * 60 * 1000);
+      }
 
       // Record outbox event
       await outboxService.recordEvent({
@@ -609,6 +943,11 @@ export class BookingService {
           resourceId: booking.resourceId,
           userId,
           holdExpiresAt: booking.holdExpiresAt,
+          quantity: booking.quantity || 1,
+          totalAmount: Number(booking.totalAmount),
+          cashDue: Number(booking.cashDue),
+          coinsRedeemed: Number(booking.coinsRedeemed),
+          coinTenderAmount: Number(booking.coinTenderAmount),
           discountAmount: (booking as any).discountAmount || 0,
           discountCode: (booking as any).discountCode,
         },
@@ -624,7 +963,11 @@ export class BookingService {
         endTime: booking.endTime.toISOString(),
         holdExpiresAt:
           booking.holdExpiresAt?.toISOString() || new Date().toISOString(),
+        quantity: booking.quantity || 1,
         totalAmount: Number(booking.totalAmount),
+        cashDue: Number(booking.cashDue),
+        coinsRedeemed: Number(booking.coinsRedeemed),
+        coinTenderAmount: Number(booking.coinTenderAmount),
         originalAmount: (booking as any).originalAmount
           ? Number((booking as any).originalAmount)
           : undefined,
@@ -634,6 +977,7 @@ export class BookingService {
         discountCode: (booking as any).discountCode || undefined,
         currency: booking.currency,
         state: booking.state,
+        qrToken: (booking as any).qrToken || undefined,
       };
     } catch (err: any) {
       if (
@@ -653,6 +997,75 @@ export class BookingService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Expire hold and release coins/transactions under hierarchical lock order
+   */
+  async expireHold(bookingId: string) {
+    return prisma.$transaction(
+      async (tx) => {
+        // Hierarchical lock order:
+        // 1. Lock pending transactions
+        await tx.$queryRaw`
+          SELECT id FROM "transactions" WHERE "bookingId" = ${bookingId} AND "status" = 'PENDING' FOR UPDATE
+        `;
+
+        // 2. Lock booking
+        const bookings = await tx.$queryRaw<
+          Array<{ id: string; state: string }>
+        >`
+          SELECT id, state FROM "bookings" WHERE id = ${bookingId} FOR UPDATE
+        `;
+        if (bookings.length === 0) return { expired: false };
+        const b = bookings[0];
+
+        if (!["HELD", "PENDING_PAYMENT"].includes(b.state)) {
+          return { expired: false, state: b.state };
+        }
+
+        // 3. Lock active coin hold
+        await tx.$queryRaw`
+          SELECT id FROM "coin_holds" WHERE "bookingId" = ${bookingId} AND "status" = 'ACTIVE' FOR UPDATE
+        `;
+
+        // Update transactions: PENDING -> EXPIRED
+        await tx.transaction.updateMany({
+          where: { bookingId, status: PaymentStatus.PENDING },
+          data: { status: PaymentStatus.EXPIRED },
+        });
+
+        // Update booking: state -> EXPIRED
+        await tx.booking.update({
+          where: { id: bookingId },
+          data: { state: BookingState.EXPIRED },
+        });
+
+        // Update coin hold: ACTIVE -> RELEASED
+        await tx.coinHold.updateMany({
+          where: { bookingId, status: HoldStatus.ACTIVE },
+          data: { status: HoldStatus.RELEASED },
+        });
+
+        await discountService.releaseHeldRedemptionTx(tx, bookingId);
+        await loyaltyService.releaseBookingRedemptionHold(bookingId);
+
+        await outboxService.recordEvent(
+          {
+            eventType: "booking.hold_expired",
+            aggregateType: "Booking",
+            aggregateId: bookingId,
+            payload: {
+              bookingId,
+            },
+          },
+          tx,
+        );
+
+        return { expired: true };
+      },
+      { timeout: 15000, maxWait: 10000 },
+    );
   }
 
   /**
@@ -707,48 +1120,6 @@ export class BookingService {
   }
 
   /**
-   * Automatically expires a hold if payment is not completed
-   */
-  async expireHold(bookingId: string) {
-    const booking = await this.repo.findById(bookingId);
-    if (!booking) return;
-
-    if (
-      booking.state === BookingState.HELD ||
-      booking.state === BookingState.PENDING_PAYMENT
-    ) {
-      if (
-        booking.holdExpiresAt &&
-        new Date(booking.holdExpiresAt) <= new Date()
-      ) {
-        assertValidTransition(
-          booking.state as BookingState,
-          BookingState.EXPIRED,
-          booking.id,
-        );
-        await this.repo.updateState(prisma, booking.id, BookingState.EXPIRED);
-        await discountService.releaseHeldRedemptionTx(prisma, booking.id);
-        await loyaltyService.releaseBookingRedemptionHold(booking.id);
-
-        console.log(
-          `⏰ Booking hold expired for '${booking.reference}' (${booking.id})`,
-        );
-
-        await outboxService.recordEvent({
-          eventType: "booking.hold_expired",
-          aggregateType: "Booking",
-          aggregateId: booking.id,
-          payload: {
-            bookingId: booking.id,
-            reference: booking.reference,
-            resourceId: booking.resourceId,
-          },
-        });
-      }
-    }
-  }
-
-  /**
    * Cancel an active hold (or unconfirmed booking).
    * Confirmed bookings cannot be cancelled under the No-Refund Policy.
    */
@@ -780,11 +1151,21 @@ export class BookingService {
     }
 
     // Confirmed bookings cannot be cancelled by customers under the strict No-Refund Policy
-    if (booking.state === BookingState.CONFIRMED && !isStaff) {
+    const nonCancellableStates: BookingState[] = [
+      BookingState.CONFIRMED,
+      BookingState.CHECKED_IN,
+      BookingState.CHECKED_OUT,
+      BookingState.COMPLETED,
+      BookingState.ACTIVE,
+    ];
+    if (
+      nonCancellableStates.includes(booking.state as BookingState) &&
+      !isStaff
+    ) {
       const error: any = new Error(
         "Confirmed bookings cannot be cancelled under DAIH's No-Refund Policy. If you missed your session, an Operations Admin can grant a discretionary reschedule.",
       );
-      error.statusCode = 400;
+      error.statusCode = 403;
       error.code = "CANNOT_CANCEL_CONFIRMED_BOOKING";
       throw error;
     }
@@ -803,6 +1184,28 @@ export class BookingService {
     await discountService.releaseHeldRedemptionTx(prisma, bookingId);
     await loyaltyService.releaseBookingRedemptionHold(bookingId);
     await cancelHoldExpiryJob(bookingId);
+
+    // Actively update any linked PENDING transactions to ABANDONED
+    await prisma.transaction.updateMany({
+      where: {
+        bookingId,
+        status: PaymentStatus.PENDING,
+      },
+      data: {
+        status: PaymentStatus.ABANDONED,
+      },
+    });
+
+    // Mark active coin_holds as RELEASED
+    await prisma.coinHold.updateMany({
+      where: {
+        bookingId,
+        status: HoldStatus.ACTIVE,
+      },
+      data: {
+        status: HoldStatus.RELEASED,
+      },
+    });
 
     // Audit log
     await prisma.auditLog.create({

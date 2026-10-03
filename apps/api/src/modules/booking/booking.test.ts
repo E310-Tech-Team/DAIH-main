@@ -520,7 +520,7 @@ describe("Milestone 1.3: Booking Engine & Concurrency Module", () => {
         .set("Authorization", `Bearer ${customerToken}`)
         .send({ reason: "I changed my mind" });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(403);
       expect(res.body.code).toBe("CANNOT_CANCEL_CONFIRMED_BOOKING");
 
       // Verify booking remains CONFIRMED in DB

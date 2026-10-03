@@ -184,5 +184,5 @@ export interface GenerateCopyResponseDTO {
   subject: string;
   body: string;
   previewText: string;
-  confidenceScore: number;
+  confidenceScore?: number;
 }

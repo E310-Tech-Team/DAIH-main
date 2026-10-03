@@ -108,10 +108,10 @@ export const AiCopyModal: React.FC<AiCopyModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                PeeDee AI Copy Assistant
+                Curated Campaign Template Assistant
               </h3>
               <p className="text-[11px] text-slate-500">
-                Draft high-converting copy adhering to brand guidelines
+                Select brand-aligned messaging and offers for your campaign
               </p>
             </div>
           </div>
@@ -188,7 +188,9 @@ export const AiCopyModal: React.FC<AiCopyModalProps> = ({
                   <Wand2 className="w-3.5 h-3.5" />
                 )}
                 <span>
-                  {isGenerating ? "Drafting Copy..." : "Generate AI Copy"}
+                  {isGenerating
+                    ? "Loading Template..."
+                    : "Load Curated Template"}
                 </span>
               </button>
             </div>
@@ -200,11 +202,10 @@ export const AiCopyModal: React.FC<AiCopyModalProps> = ({
               <div className="flex items-center justify-between">
                 <span className="font-bold text-[#23055c] flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-purple-700" />
-                  AI Generated Draft
+                  Curated Campaign Template
                 </span>
-                <span className="text-[10px] font-mono font-bold text-purple-700 bg-purple-100 px-2 py-0.5 rounded">
-                  Confidence:{" "}
-                  {Math.round(generatedResult.confidenceScore * 100)}%
+                <span className="text-[10px] font-bold text-purple-700 bg-purple-100 px-2 py-0.5 rounded">
+                  Verified Template
                 </span>
               </div>
 

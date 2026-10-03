@@ -220,7 +220,7 @@ export const GoogleAuthButton: React.FC<GoogleAuthButtonProps> = ({
       {scriptError && (
         <button
           type="button"
-          onClick={() => {
+          onClick={async () => {
             let referralCode = "";
             try {
               referralCode =
@@ -231,9 +231,37 @@ export const GoogleAuthButton: React.FC<GoogleAuthButtonProps> = ({
             } catch {}
             const apiUrl =
               process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+
+            let codeChallengeParam = "";
+            try {
+              const array = new Uint8Array(32);
+              window.crypto.getRandomValues(array);
+              const verifier = Array.from(array, (dec) =>
+                dec.toString(36).padStart(2, "0"),
+              ).join("");
+              sessionStorage.setItem("daih_pkce_verifier", verifier);
+
+              const encoder = new TextEncoder();
+              const data = encoder.encode(verifier);
+              const hash = await window.crypto.subtle.digest("SHA-256", data);
+              const hashArray = Array.from(new Uint8Array(hash));
+              const base64 = btoa(String.fromCharCode(...hashArray));
+              const challenge = base64
+                .replace(/\+/g, "-")
+                .replace(/\//g, "_")
+                .replace(/=+$/, "");
+              codeChallengeParam = `&code_challenge=${encodeURIComponent(
+                challenge,
+              )}&code_challenge_method=S256`;
+            } catch (e) {
+              console.warn("Could not generate PKCE challenge:", e);
+            }
+
             window.location.href = `${apiUrl}/api/v1/identity/oauth/google?ref=${encodeURIComponent(
               referralCode,
-            )}&destination=${encodeURIComponent(targetDestination)}`;
+            )}&destination=${encodeURIComponent(
+              targetDestination,
+            )}${codeChallengeParam}`;
           }}
           className="absolute inset-0 flex items-center justify-center gap-2 py-2 px-4 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl text-slate-700 text-xs font-semibold shadow-sm transition-colors z-10 cursor-pointer"
         >

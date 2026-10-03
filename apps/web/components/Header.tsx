@@ -72,7 +72,7 @@ export const Header: React.FC<{ isTransparent?: boolean }> = ({
       <div className="container" suppressHydrationWarning>
         <div className="row" suppressHydrationWarning>
           <div className="col-md-12" suppressHydrationWarning>
-            <div className="de-flex sm-pt10" suppressHydrationWarning>
+            <div className="de-flex" suppressHydrationWarning>
               <div className="de-flex-col" suppressHydrationWarning>
                 <div className="de-flex-col" suppressHydrationWarning>
                   {/* logo begin */}

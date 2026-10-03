@@ -198,6 +198,20 @@ async function main() {
   console.log(`  Discrepant Accounts: ${audit.discrepantUsers}`);
   console.log(`======================================================\n`);
 
+  try {
+    const fs = await import("fs");
+    const path = await import("path");
+    const reportsDir = path.join(process.cwd(), "reports");
+    if (!fs.existsSync(reportsDir)) {
+      fs.mkdirSync(reportsDir, { recursive: true });
+    }
+    const reportPath = path.join(reportsDir, "reconcile-report.json");
+    fs.writeFileSync(reportPath, JSON.stringify(audit, null, 2));
+    console.log(`📁 Report archived to: ${reportPath}\n`);
+  } catch (err) {
+    console.warn("Could not archive report file:", err);
+  }
+
   if (audit.discrepantUsers > 0) {
     process.exit(1);
   }

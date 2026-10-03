@@ -66,6 +66,85 @@ function isTokenExpiringSoon(
   }
 }
 
+export async function clearPrivateCacheAndStorage() {
+  if (typeof window === "undefined") return;
+
+  // 1. Purge Cache Storage for private responses /api/*
+  if ("caches" in window) {
+    try {
+      const keys = await window.caches.keys();
+      await Promise.all(
+        keys.map(async (key) => {
+          const cache = await window.caches.open(key);
+          const requests = await cache.keys();
+          await Promise.all(
+            requests.map((req) => {
+              const url = new URL(req.url);
+              if (
+                url.pathname.includes("/api/") ||
+                url.pathname.includes("/identity/")
+              ) {
+                return cache.delete(req);
+              }
+              return Promise.resolve(false);
+            }),
+          );
+        }),
+      );
+    } catch (e) {
+      console.warn("[Auth] Failed to purge caches:", e);
+    }
+  }
+
+  // 2. Post message to active Service Worker controller
+  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    try {
+      navigator.serviceWorker.controller.postMessage({
+        type: "PURGE_PRIVATE_CACHE",
+      });
+    } catch {}
+  }
+
+  // 3. Purge user-scoped localStorage keys
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (
+        key &&
+        (key.startsWith("daih_") ||
+          key.includes("token") ||
+          key.includes("user") ||
+          key.includes("profile") ||
+          key.includes("auth"))
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+  } catch {}
+
+  // 4. Purge sessionStorage
+  try {
+    sessionStorage.clear();
+  } catch {}
+}
+
+export function broadcastLogoutEvent() {
+  if (typeof window !== "undefined") {
+    try {
+      const BC =
+        (window as any).BroadcastChannel ||
+        (globalThis as any).BroadcastChannel;
+      if (BC) {
+        const channel = new BC("daih_auth");
+        channel.postMessage("LOGOUT");
+        channel.close();
+      }
+    } catch {}
+  }
+}
+
 export function AuthProvider({
   children,
   apiClient = api,
@@ -107,11 +186,34 @@ export function AuthProvider({
     }
   }, []);
 
+  // Multi-tab logout synchronization via BroadcastChannel
   useEffect(() => {
-    apiClient.setOnSessionExpired(() => {
+    if (typeof window === "undefined" || !("BroadcastChannel" in window))
+      return;
+    const channel = new BroadcastChannel("daih_auth");
+    channel.onmessage = async (event) => {
+      if (event.data === "LOGOUT") {
+        updateUserState(null);
+        setAccessToken(null);
+        apiClient.setAccessToken(null);
+        await clearPrivateCacheAndStorage();
+        if (!window.location.pathname.includes("/login")) {
+          window.location.href = "/login";
+        }
+      }
+    };
+    return () => {
+      channel.close();
+    };
+  }, [apiClient, updateUserState]);
+
+  useEffect(() => {
+    apiClient.setOnSessionExpired(async () => {
       updateUserState(null);
       setAccessToken(null);
       apiClient.setAccessToken(null);
+      await clearPrivateCacheAndStorage();
+      broadcastLogoutEvent();
       if (
         typeof window !== "undefined" &&
         !window.location.pathname.includes("/login")
@@ -306,6 +408,8 @@ export function AuthProvider({
       updateUserState(null);
       setAccessToken(null);
       apiClient.setAccessToken(null);
+      await clearPrivateCacheAndStorage();
+      broadcastLogoutEvent();
       setIsLoading(false);
     }
   };

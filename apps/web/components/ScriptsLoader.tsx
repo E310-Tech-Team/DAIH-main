@@ -51,6 +51,15 @@ export const ScriptsLoader = () => {
         } catch {
           // intentionally suppressed — lazy images are non-critical
         }
+
+        // Trigger synthetic scroll & resize events so WOW.js and layout calculations
+        // immediately reveal any above-the-fold elements without requiring manual scroll.
+        try {
+          window.dispatchEvent(new Event("scroll"));
+          window.dispatchEvent(new Event("resize"));
+        } catch {
+          // ignore
+        }
         return;
       }
 

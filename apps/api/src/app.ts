@@ -26,7 +26,7 @@ import { swaggerRouter } from "./modules/docs/swagger.routes.js";
 import path from "node:path";
 import fs from "node:fs";
 import { errorHandler } from "./middleware/error-handler.middleware.js";
-import { config } from "./config/env.js";
+import { config, isAllowedOrigin } from "./config/env.js";
 
 export const app = express();
 
@@ -45,40 +45,8 @@ app.use(
       // Allow server-to-server, curl, mobile apps, and webhook callbacks with no origin
       if (!origin) return callback(null, true);
 
-      const cleanOrigin = origin.replace(/\/$/, "").toLowerCase();
-
-      const isAllowed = config.cors.allowedOrigins.some(
-        (allowed) => allowed.replace(/\/$/, "").toLowerCase() === cleanOrigin,
-      );
-
-      if (isAllowed) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
-      }
-
-      // Always permit official daih.ng subdomains (cross-subdomain production access)
-      const isOfficialDomain = /^https:\/\/([a-zA-Z0-9-]+\.)*daih\.ng$/.test(
-        cleanOrigin,
-      );
-      if (isOfficialDomain) {
-        return callback(null, true);
-      }
-
-      // In development / non-production, permit localhost, 127.0.0.1, and configured tunnel URL
-      if (config.env !== "production") {
-        const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(
-          cleanOrigin,
-        );
-        const configuredTunnel = process.env.CLOUDFLARE_TUNNEL_URL?.replace(
-          /\/$/,
-          "",
-        ).toLowerCase();
-        const isConfiguredTunnel = configuredTunnel
-          ? cleanOrigin === configuredTunnel
-          : false;
-
-        if (isLocalhost || isConfiguredTunnel) {
-          return callback(null, true);
-        }
       }
 
       return callback(null, false);
@@ -86,6 +54,10 @@ app.use(
     credentials: true,
   }),
 );
+app.use((req, res, next) => {
+  res.header("Vary", "Origin");
+  next();
+});
 app.use(cookieParser());
 
 // Ensure uploads directory exists and mount static routes

@@ -3,6 +3,19 @@ import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { paymentsService, PaymentsService } from "./payments.service.js";
 import { invoiceService, InvoiceService } from "./invoice.service.js";
 import { refundService, RefundService } from "./refund.service.js";
+import { prisma } from "../../db/client.js";
+
+export function getWebhookDedupKey(event: any): string {
+  if (!event) return `event_${Date.now()}`;
+  if (event.event === "charge.success") {
+    return `charge.success_${event.data?.reference || event.data?.id}`;
+  }
+  if (event.event && event.event.startsWith("refund.")) {
+    const refundId = event.data?.id || event.data?.transaction_reference;
+    return `${event.event}_${refundId}`;
+  }
+  return `${event.event}_${event.data?.id || event.data?.reference || Date.now()}`;
+}
 
 export class PaymentsController {
   constructor(
@@ -43,17 +56,52 @@ export class PaymentsController {
   /**
    * POST /api/v1/payments/webhook
    * Paystack webhook endpoint (HMAC signature verified)
+   * Persist-Then-Ack architecture
    */
   webhook = async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const event = (req as any).paystackEvent || req.body;
-      const result = await this.service.handleWebhookEvent(event);
-      // Webhooks must always return 200 OK
-      res.status(200).json({ ...result, received: true });
+      let event = (req as any).paystackEvent;
+      if (!event) {
+        if (Buffer.isBuffer(req.body)) {
+          event = JSON.parse(req.body.toString("utf8"));
+        } else if (typeof req.body === "string") {
+          event = JSON.parse(req.body);
+        } else {
+          event = req.body;
+        }
+      }
+
+      const dedupKey = getWebhookDedupKey(event);
+      const eventType = event?.event || "unknown";
+
+      try {
+        await prisma.webhookEvent.create({
+          data: {
+            eventId: dedupKey,
+            eventType,
+            payload: event as any,
+            status: "PENDING",
+            nextAttemptAt: null,
+          },
+        });
+      } catch (err: any) {
+        if (err.code === "P2002") {
+          // Idempotent duplicate delivery
+          return res.status(200).json({ received: true, duplicate: true });
+        }
+        // DB failure -> throw to trigger HTTP 500/503 so Paystack retries
+        console.error("❌ Failed to persist webhook event:", err);
+        return res.status(500).json({
+          received: false,
+          error: "Database error persisting webhook event",
+        });
+      }
+
+      // Return HTTP 200 immediately to acknowledge gateway
+      return res.status(200).json({ received: true });
     } catch (err: any) {
-      console.error("❌ Unhandled webhook error:", err.message);
-      // Return 200 to acknowledge receipt and avoid unbounded gateway retry spam
-      res.status(200).json({ received: true, error: err.message });
+      console.error("❌ Unhandled webhook ingestion error:", err.message);
+      return res.status(500).json({ received: false, error: err.message });
     }
   };
 
@@ -105,9 +153,7 @@ export class PaymentsController {
       const userId = req.user?.id;
       const role = req.user?.role;
 
-      const isStaff =
-        role &&
-        ["FINANCE_OFFICER", "SUPER_ADMIN", "OPERATIONS_ADMIN"].includes(role);
+      const isStaff = role && ["FINANCE_OFFICER", "SUPER_ADMIN"].includes(role);
       const result = await this.service.verifyPayment(
         transactionId,
         isStaff ? undefined : userId,
@@ -133,9 +179,7 @@ export class PaymentsController {
       const userId = req.user?.id;
       const role = req.user?.role;
 
-      const isStaff =
-        role &&
-        ["FINANCE_OFFICER", "SUPER_ADMIN", "OPERATIONS_ADMIN"].includes(role);
+      const isStaff = role && ["FINANCE_OFFICER", "SUPER_ADMIN"].includes(role);
       const result = await this.service.verifyPayment(
         transactionId,
         isStaff ? undefined : userId,
@@ -157,9 +201,7 @@ export class PaymentsController {
       const userId = req.user?.id;
       const role = req.user?.role;
 
-      const isStaff =
-        role &&
-        ["FINANCE_OFFICER", "SUPER_ADMIN", "OPERATIONS_ADMIN"].includes(role);
+      const isStaff = role && ["FINANCE_OFFICER", "SUPER_ADMIN"].includes(role);
       const invoice = await this.invoices.getInvoice(
         transactionId,
         isStaff ? undefined : userId,
