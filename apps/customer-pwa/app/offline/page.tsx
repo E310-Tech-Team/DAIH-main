@@ -48,7 +48,7 @@ export default function OfflinePage() {
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
             Connection Lost
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 leading-relaxed">
+          <p className="text-xs sm:text-sm text-slate-600 leading-relaxed font-medium">
             It looks like you are currently offline. Check your network
             connection and try again.
           </p>
@@ -72,22 +72,22 @@ export default function OfflinePage() {
           </Link>
         </div>
 
-        <div className="border-t border-slate-100 pt-5 text-xs text-slate-500 space-y-2">
+        <div className="border-t border-slate-100 pt-5 text-xs text-slate-600 space-y-2">
           {contact?.phone ? (
             <a
               href={`tel:${contact.phone.replace(/\s+/g, "")}`}
-              className="flex items-center justify-center gap-1.5 text-slate-700 font-semibold hover:text-[#23055c] transition-colors"
+              className="flex items-center justify-center gap-1.5 text-slate-800 font-semibold hover:text-[#23055c] transition-colors"
             >
               <Phone className="w-3.5 h-3.5 text-[#23055c]" />
               <span>Front Desk: {contact.phone}</span>
             </a>
           ) : (
-            <div className="flex items-center justify-center gap-1.5 text-slate-700 font-semibold">
+            <div className="flex items-center justify-center gap-1.5 text-slate-800 font-semibold">
               <Phone className="w-3.5 h-3.5 text-[#23055c]" />
               <span>Hub Front Desk Reception</span>
             </div>
           )}
-          <p className="text-[11px] text-slate-400">
+          <p className="text-[11px] text-slate-600 font-medium">
             If you are on site at DAIH Hub, please verify with reception or
             check your network connection.
           </p>
@@ -95,7 +95,7 @@ export default function OfflinePage() {
       </main>
 
       {/* Footer */}
-      <footer className="text-center py-4 text-xs text-slate-400">
+      <footer className="text-center py-4 text-xs text-slate-600 font-medium">
         DAIH Workspace &copy; {new Date().getFullYear()}
       </footer>
     </div>

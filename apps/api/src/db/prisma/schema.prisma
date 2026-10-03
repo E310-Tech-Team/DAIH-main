@@ -50,6 +50,10 @@ enum PaymentStatus {
   FAILED
   REFUNDED
   PARTIALLY_REFUNDED
+  ABANDONED
+  EXPIRED
+  FLAGGED_MISMATCH
+  REQUIRES_RECONCILIATION
 }
 
 enum TransactionType {
@@ -66,8 +70,10 @@ enum PaymentMethod {
 
 enum OutboxStatus {
   PENDING
+  PROCESSING
   PUBLISHED
   FAILED
+  DEAD_LETTER
 }
 
 enum MfaMethod {
@@ -144,6 +150,8 @@ enum RefundStatus {
   REJECTED
   PROCESSED
   FAILED
+  PROCESSING
+  REQUIRES_RECONCILIATION
 }
 
 enum RefundReasonCode {
@@ -152,6 +160,7 @@ enum RefundReasonCode {
   DUPLICATE_PAYMENT
   UNAVAILABLE_RESOURCE
   CUSTOMER_DISPUTE
+  PRICE_CHANGED
   OTHER
 }
 
@@ -173,6 +182,7 @@ model User {
   mfaMethod          MfaMethod?           // null until configured
   mfaSecret          String?              // AES-256-GCM encrypted TOTP secret
   skipAnonymization  Boolean              @default(false)
+  deactivatedAt      DateTime?
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
 
@@ -216,6 +226,7 @@ model User {
   @@index([referredById])
   @@index([referredById, createdAt])
   @@index([referralCode])
+  @@index([deactivatedAt])
   @@map("users")
 }
 
@@ -333,13 +344,18 @@ model OutboxEvent {
   payload       Json
   status        OutboxStatus @default(PENDING)
   retryCount    Int          @default(0)
+  attempts      Int          @default(0)
   error         String?
+  lastError     String?
+  workerId      String?
+  lockedAt      DateTime?
   scheduledAt   DateTime     @default(now())
   processedAt   DateTime?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
   @@index([status, scheduledAt])
+  @@index([status, lockedAt])
   @@map("outbox_events")
 }
 
@@ -455,7 +471,12 @@ model Booking {
   endTime         DateTime
   state           BookingState     @default(DRAFT)
   holdExpiresAt   DateTime?
+  quantity        Int              @default(1)
   totalAmount     Decimal          @db.Decimal(12, 2)
+  cashDue         Decimal          @db.Decimal(12, 2) @default(0)
+  coinsRedeemed   Decimal          @db.Decimal(18, 4) @default(0)
+  coinTenderAmount Decimal         @db.Decimal(12, 2) @default(0)
+  conversionRateSnapshot Decimal?  @db.Decimal(12, 4)
   originalAmount  Decimal?         @db.Decimal(12, 2)
   discountAmount  Decimal?         @db.Decimal(12, 2) @default(0)
   discountId      String?
@@ -478,7 +499,7 @@ model Booking {
   redemptions     DiscountRedemption[]
   review          Review?
   coinHold        CoinHold?
-  refundRequest   RefundRequest?
+  refundRequests  RefundRequest[]
 
   @@index([resourceId, startTime, endTime])
   @@index([state])
@@ -516,6 +537,7 @@ model Transaction {
   booking           Booking        @relation(fields: [bookingId], references: [id])
   user              User           @relation(fields: [userId], references: [id])
   invoice           Invoice?
+  refundRequest     RefundRequest?
 
   @@index([status])
   @@index([bookingId])
@@ -884,8 +906,8 @@ model CoinHold {
 
 model RefundRequest {
   id                      String           @id @default(uuid())
-  bookingId               String           @unique
-  transactionId           String?
+  bookingId               String?
+  transactionId           String?          @unique
   amount                  Decimal          @db.Decimal(12, 2)
   coinsToReverse          Decimal          @db.Decimal(12, 4) @default(0)
   coinsToClawback         Decimal          @db.Decimal(12, 4) @default(0)
@@ -894,7 +916,8 @@ model RefundRequest {
   reasonCode              RefundReasonCode
   reason                  String           @db.Text
   status                  RefundStatus     @default(PENDING)
-  requestedByUserId       String
+  isSystemInitiated       Boolean          @default(false)
+  requestedByUserId       String?
   requestedAt             DateTime         @default(now())
   reviewedByUserId        String?
   reviewedAt              DateTime?
@@ -904,16 +927,23 @@ model RefundRequest {
   paystackRefundId        String?
   gatewayReference        String?
   failureReason           String?
+  workerId                String?
+  claimedAt               DateTime?
+  gatewayRequestedAt      DateTime?
+  attempts                Int              @default(0)
+  lastError               String?
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
-  booking                 Booking          @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  requestedBy             User             @relation("RefundRequestedBy", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+  booking                 Booking?         @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  transaction             Transaction?     @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  requestedBy             User?            @relation("RefundRequestedBy", fields: [requestedByUserId], references: [id], onDelete: Cascade)
   reviewedBy              User?            @relation("RefundReviewedBy", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
   referrer                User?            @relation("RefundReferrer", fields: [referrerId], references: [id], onDelete: SetNull)
 
   @@index([status, requestedAt])
   @@index([bookingId])
+  @@index([transactionId])
   @@index([requestedByUserId])
   @@index([reviewedByUserId])
   @@map("refund_requests")
@@ -1041,5 +1071,39 @@ model CampaignMetric {
 
   @@unique([campaignId, period])
   @@map("campaign_metrics")
+}
+
+enum WebhookEventStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+}
+
+model WebhookEvent {
+  id             String             @id @default(uuid())
+  eventId        String             @unique
+  eventType      String
+  payload        Json
+  status         WebhookEventStatus @default(PENDING)
+  leaseHolder    String?
+  workerId       String?
+  leasedAt       DateTime?
+  lockedAt       DateTime?
+  leaseExpiresAt DateTime?
+  nextAttemptAt  DateTime?
+  processedAt    DateTime?
+  error          String?
+  lastError      String?
+  retryCount     Int                @default(0)
+  attempts       Int                @default(0)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([status, leaseExpiresAt])
+  @@index([status, nextAttemptAt])
+  @@index([eventId])
+  @@map("webhook_events")
 }
 

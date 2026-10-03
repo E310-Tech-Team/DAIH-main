@@ -2,6 +2,8 @@ import crypto from "crypto";
 import { prisma } from "../db/client.js";
 import { outboxService } from "../modules/events/outbox.service.js";
 import { UserRole } from "@daih/types";
+import { CoinLedgerAction } from "@prisma/client";
+import { Decimal } from "@prisma/client/runtime/library";
 
 export interface RetentionCleanupSummary {
   expiredPasswordResetTokens: number;
@@ -74,6 +76,147 @@ export class RetentionService {
   }
 
   /**
+   * Expire dormant coins for accounts inactive >= thresholdMonths.
+   * Runs under coin_balances lock immediately before anonymization.
+   */
+  async expireInactiveCoins(
+    cutoffDate: Date,
+    options: { dryRun?: boolean } = {},
+  ): Promise<{ expiredUsersCount: number; userIds: string[] }> {
+    const now = new Date();
+    const dryRun = options.dryRun ?? false;
+
+    // Find users eligible for coin expiry with unified predicate guards
+    const eligibleUsers = await prisma.user.findMany({
+      where: {
+        role: UserRole.CUSTOMER,
+        skipAnonymization: false,
+        createdAt: { lt: cutoffDate },
+        sessions: {
+          none: { lastUsedAt: { gte: cutoffDate } },
+        },
+        bookings: {
+          none: {
+            OR: [
+              { createdAt: { gte: cutoffDate } },
+              { endTime: { gt: now } },
+              {
+                state: {
+                  in: [
+                    "HELD",
+                    "PENDING_PAYMENT",
+                    "CONFIRMED",
+                    "CHECKED_IN",
+                    "ACTIVE",
+                  ] as any,
+                },
+              },
+            ],
+          },
+        },
+        coinBalance: {
+          balance: { gt: 0 },
+        },
+        coinHolds: {
+          none: {
+            status: "ACTIVE" as any,
+          },
+        },
+        transactions: {
+          none: {
+            status: "PENDING" as any,
+          },
+        },
+        refundRequestsRaised: {
+          none: {
+            status: {
+              in: ["PENDING", "PROCESSING", "REQUIRES_RECONCILIATION"] as any,
+            },
+          },
+        },
+      },
+      select: {
+        id: true,
+        clientId: true,
+        coinBalance: { select: { balance: true } },
+      },
+      take: 100,
+    });
+
+    const expiredUserIds: string[] = [];
+
+    for (const user of eligibleUsers) {
+      const balance = user.coinBalance?.balance
+        ? new Decimal(user.coinBalance.balance)
+        : new Decimal(0);
+
+      if (balance.lte(0)) continue;
+
+      if (dryRun) {
+        console.log(
+          `[DRY-RUN] Would expire ${balance} coins for user ${user.clientId || user.id}`,
+        );
+        expiredUserIds.push(user.id);
+        continue;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        // Lock coin balance
+        const [balRow] = await tx.$queryRaw<Array<{ balance: Decimal }>>`
+          SELECT balance FROM "coin_balances" WHERE "userId" = ${user.id} FOR UPDATE
+        `;
+
+        const curBal = balRow?.balance
+          ? new Decimal(balRow.balance)
+          : new Decimal(0);
+        if (curBal.lte(0)) return;
+
+        await tx.coinLedgerEntry.create({
+          data: {
+            userId: user.id,
+            action: CoinLedgerAction.EXPIRY,
+            amount: curBal.negated(),
+            balanceAfter: new Decimal(0),
+            referenceType: "AccountRetention",
+            referenceId: user.id,
+            idempotencyKey: `coin_expiry_${user.id}_${cutoffDate.toISOString().slice(0, 10)}`,
+            metadata: {
+              expiredAt: new Date().toISOString(),
+              reason: "Dormant account inactivity expiry",
+            },
+          },
+        });
+
+        await tx.coinBalance.update({
+          where: { userId: user.id },
+          data: { balance: new Decimal(0) },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: "LOYALTY_COINS_EXPIRED",
+            entityType: "User",
+            entityId: user.id,
+            metadata: {
+              clientId: user.clientId,
+              expiredAmount: curBal.toNumber(),
+              cutoffDate: cutoffDate.toISOString(),
+            },
+          },
+        });
+      });
+
+      expiredUserIds.push(user.id);
+    }
+
+    return {
+      expiredUsersCount: expiredUserIds.length,
+      userIds: expiredUserIds,
+    };
+  }
+
+  /**
    * Anonymizes inactive customer accounts older than thresholdMonths (default 24 months).
    * Aligned with the Nigeria Data Protection Act (NDPA) 2023.
    *
@@ -82,11 +225,17 @@ export class RetentionService {
    */
   async anonymizeInactiveCustomers(
     thresholdMonths = 24,
+    options: { dryRun?: boolean } = {},
   ): Promise<AnonymizationSummary> {
+    const dryRun = options.dryRun ?? false;
+    const now = new Date();
     const cutoffDate = new Date();
     cutoffDate.setMonth(cutoffDate.getMonth() - thresholdMonths);
 
-    // Find CUSTOMER accounts with no activity since cutoffDate
+    // 1. Run coin expiry pass immediately prior to anonymization
+    const expiryResult = await this.expireInactiveCoins(cutoffDate, { dryRun });
+
+    // 2. Find CUSTOMER accounts with no activity since cutoffDate and unified predicate guards
     const inactiveCustomers = await prisma.user.findMany({
       where: {
         role: UserRole.CUSTOMER,
@@ -100,12 +249,54 @@ export class RetentionService {
             lastUsedAt: { gte: cutoffDate },
           },
         },
-        // No bookings created since cutoffDate
+        // No bookings created since cutoffDate, and no future or active bookings
         bookings: {
           none: {
-            createdAt: { gte: cutoffDate },
+            OR: [
+              { createdAt: { gte: cutoffDate } },
+              { endTime: { gt: now } },
+              {
+                state: {
+                  in: [
+                    "HELD",
+                    "PENDING_PAYMENT",
+                    "CONFIRMED",
+                    "CHECKED_IN",
+                    "ACTIVE",
+                  ] as any,
+                },
+              },
+            ],
           },
         },
+        // No active coin holds
+        coinHolds: {
+          none: {
+            status: "ACTIVE" as any,
+          },
+        },
+        // No pending transactions
+        transactions: {
+          none: {
+            status: "PENDING" as any,
+          },
+        },
+        // No open refund requests or disputes
+        refundRequestsRaised: {
+          none: {
+            status: {
+              in: ["PENDING", "PROCESSING", "REQUIRES_RECONCILIATION"] as any,
+            },
+          },
+        },
+        // Unspent coin balance must be 0 (in dryRun mode, include users whose coins would be expired)
+        OR: [
+          { coinBalance: null },
+          { coinBalance: { balance: { lte: 0 } } },
+          ...(dryRun && expiryResult.userIds.length > 0
+            ? [{ id: { in: expiryResult.userIds } }]
+            : []),
+        ],
       },
       select: {
         id: true,
@@ -118,6 +309,14 @@ export class RetentionService {
     const anonymizedUserIds: string[] = [];
 
     for (const customer of inactiveCustomers) {
+      if (dryRun) {
+        console.log(
+          `[DRY-RUN] Would anonymize customer ${customer.clientId || customer.id} (${customer.email})`,
+        );
+        anonymizedUserIds.push(customer.id);
+        continue;
+      }
+
       const anonHash = crypto
         .createHash("sha256")
         .update(customer.id)

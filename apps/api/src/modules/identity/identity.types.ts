@@ -22,6 +22,19 @@ export interface UserSummaryDTO {
   needsConsent?: boolean;
   mfaEnabled?: boolean;
   mfaMethod?: "EMAIL_OTP" | "TOTP" | null;
+  deactivatedAt?: Date | null;
+}
+
+export interface DeactivateAccountDTO {
+  password?: string;
+  otp?: string;
+  forfeitCoinsConsent?: boolean;
+  reason?: string;
+}
+
+export interface ReactivateAccountDTO {
+  userId: string;
+  reason: string;
 }
 
 export interface GoogleAuthServiceDTO {
@@ -66,6 +79,7 @@ export interface GoogleOAuthCallbackResult {
   needsMfa?: boolean;
   mfaToken?: string;
   destination: string;
+  clientCodeChallenge?: string | null;
 }
 
 export interface OnboardingAttributionDTO {

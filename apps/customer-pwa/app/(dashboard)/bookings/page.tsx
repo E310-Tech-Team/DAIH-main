@@ -109,6 +109,8 @@ function BookingsContent() {
   const [existingReview, setExistingReview] = useState<ReviewDTO | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [checkingReviewId, setCheckingReviewId] = useState<string | null>(null);
+  const [supportModalBooking, setSupportModalBooking] =
+    useState<BookingSummary | null>(null);
 
   const handleOpenReview = async (b: BookingSummary) => {
     try {
@@ -900,13 +902,23 @@ function BookingsContent() {
                     </button>
                   )}
 
-                  {(isConfirmed || isHeld || isPendingPayment) && (
+                  {(isHeld || isPendingPayment) && (
                     <button
                       onClick={() => setCancellingId(b.id)}
                       className="px-3 py-2.5 border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                      title="Cancel Booking"
+                      title="Cancel Hold"
                     >
                       Cancel
+                    </button>
+                  )}
+
+                  {isConfirmed && (
+                    <button
+                      onClick={() => setSupportModalBooking(b)}
+                      className="px-3 py-2.5 border border-[#23055c]/20 text-[#23055c] hover:bg-[#23055c]/5 text-xs font-semibold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
+                      title="Reschedule / Support"
+                    >
+                      <span>Reschedule / Support</span>
                     </button>
                   )}
                 </div>
@@ -1097,6 +1109,67 @@ function BookingsContent() {
           </div>
         </div>
       )}
+
+      {/* Reschedule & Cancellation Policy Support Modal */}
+      {supportModalBooking && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5 text-[#23055c]">
+                <AlertCircle className="h-5 w-5 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900">
+                  Reschedule &amp; Policy Support
+                </h3>
+              </div>
+              <button
+                onClick={() => setSupportModalBooking(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-3 text-xs text-slate-600">
+              <p>
+                Under DAIH Hub&apos;s policy,{" "}
+                <strong>
+                  confirmed reservations cannot be cancelled or refunded
+                </strong>{" "}
+                once payment is completed.
+              </p>
+              <p>
+                If you experienced an emergency, schedule conflict, or missed
+                your session, an <strong>Operations Administrator</strong> can
+                evaluate your reservation and grant a discretionary reschedule
+                to an alternate available slot.
+              </p>
+              <div className="p-3 bg-purple-50 rounded-xl border border-purple-100 text-purple-900 space-y-1">
+                <p className="font-bold">
+                  Booking Reference: {supportModalBooking.reference}
+                </p>
+                <p className="text-[11px] text-purple-700">
+                  Resource:{" "}
+                  {supportModalBooking.resourceName || "Workspace Resource"}
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
+              <a
+                href={`mailto:support@daih.ng?subject=Reschedule%20Request%20for%20Booking%20${supportModalBooking.reference}&body=Hello%20Operations%20Team%2C%0A%0AI%20would%20like%20to%20request%20a%20reschedule%20for%20my%20booking%20${supportModalBooking.reference}.%0A%0AReason%3A%20`}
+                className="flex-1 py-2.5 bg-[#23055c] hover:bg-[#392271] text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1.5 text-center"
+              >
+                <span>Email Operations Support</span>
+              </a>
+              <button
+                onClick={() => setSupportModalBooking(null)}
+                className="py-2.5 px-4 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Statement & Financials Download Modal */}
       {showExportModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">

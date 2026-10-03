@@ -8,10 +8,6 @@ import {
   AlertCircle,
   Loader2,
   Sparkles,
-  Wifi,
-  Zap,
-  Armchair,
-  Users,
 } from "lucide-react";
 import { api } from "@daih/api-client";
 import { ReviewDTO, BookingSummary } from "@daih/types";
@@ -44,12 +40,6 @@ export function ReviewModal({
   const [title, setTitle] = useState<string>("");
   const [comment, setComment] = useState<string>("");
 
-  // Granular ratings
-  const [powerRating, setPowerRating] = useState<number>(5);
-  const [wifiRating, setWifiRating] = useState<number>(5);
-  const [comfortRating, setComfortRating] = useState<number>(5);
-  const [staffRating, setStaffRating] = useState<number>(5);
-
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,18 +48,10 @@ export function ReviewModal({
       setRating(existingReview.rating || 5);
       setTitle(existingReview.title || "");
       setComment(existingReview.comment || "");
-      setPowerRating(existingReview.powerRating || 5);
-      setWifiRating(existingReview.wifiRating || 5);
-      setComfortRating(existingReview.comfortRating || 5);
-      setStaffRating(existingReview.staffRating || 5);
     } else {
       setRating(5);
       setTitle("");
       setComment("");
-      setPowerRating(5);
-      setWifiRating(5);
-      setComfortRating(5);
-      setStaffRating(5);
     }
     setError(null);
   }, [existingReview, isOpen]);
@@ -96,10 +78,6 @@ export function ReviewModal({
           rating,
           title: title.trim() || undefined,
           comment: comment.trim(),
-          powerRating,
-          wifiRating,
-          comfortRating,
-          staffRating,
         });
       } else {
         await api.reviews.create({
@@ -107,10 +85,6 @@ export function ReviewModal({
           rating,
           title: title.trim() || undefined,
           comment: comment.trim(),
-          powerRating,
-          wifiRating,
-          comfortRating,
-          staffRating,
         });
       }
 
@@ -194,102 +168,6 @@ export function ReviewModal({
             <span className="text-xs font-semibold text-slate-900 mt-2 block">
               {RATING_LABELS[currentDisplayRating]}
             </span>
-          </div>
-
-          {/* Granular Feature Ratings */}
-          <div className="space-y-3">
-            <span className="text-xs font-bold text-slate-700 block">
-              Workspace Highlights
-            </span>
-            <div className="grid grid-cols-2 gap-3">
-              {/* Power */}
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-amber-500" />
-                  <span className="text-xs font-semibold text-slate-700">
-                    24/7 Power
-                  </span>
-                </div>
-                <div className="flex gap-1">
-                  {[1, 2, 3, 4, 5].map((s) => (
-                    <button
-                      type="button"
-                      key={s}
-                      onClick={() => setPowerRating(s)}
-                      className={`text-xs ${s <= powerRating ? "text-amber-500 font-bold" : "text-slate-300"}`}
-                    >
-                      ★
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Wi-Fi */}
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Wifi className="w-4 h-4 text-blue-500" />
-                  <span className="text-xs font-semibold text-slate-700">
-                    Fast Internet
-                  </span>
-                </div>
-                <div className="flex gap-1">
-                  {[1, 2, 3, 4, 5].map((s) => (
-                    <button
-                      type="button"
-                      key={s}
-                      onClick={() => setWifiRating(s)}
-                      className={`text-xs ${s <= wifiRating ? "text-amber-500 font-bold" : "text-slate-300"}`}
-                    >
-                      ★
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Comfort */}
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Armchair className="w-4 h-4 text-purple-500" />
-                  <span className="text-xs font-semibold text-slate-700">
-                    Comfort &amp; AC
-                  </span>
-                </div>
-                <div className="flex gap-1">
-                  {[1, 2, 3, 4, 5].map((s) => (
-                    <button
-                      type="button"
-                      key={s}
-                      onClick={() => setComfortRating(s)}
-                      className={`text-xs ${s <= comfortRating ? "text-amber-500 font-bold" : "text-slate-300"}`}
-                    >
-                      ★
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Staff */}
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Users className="w-4 h-4 text-emerald-500" />
-                  <span className="text-xs font-semibold text-slate-700">
-                    Staff Support
-                  </span>
-                </div>
-                <div className="flex gap-1">
-                  {[1, 2, 3, 4, 5].map((s) => (
-                    <button
-                      type="button"
-                      key={s}
-                      onClick={() => setStaffRating(s)}
-                      className={`text-xs ${s <= staffRating ? "text-amber-500 font-bold" : "text-slate-300"}`}
-                    >
-                      ★
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
           </div>
 
           {/* Headline */}

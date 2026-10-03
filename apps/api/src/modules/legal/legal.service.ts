@@ -10,6 +10,60 @@ import {
   UpdatePolicyDTO,
 } from "./legal.types.js";
 import { redis } from "../../config/redis.js";
+import sanitizeHtml from "sanitize-html";
+
+export const LEGAL_ALLOWED_TAGS = [
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "p",
+  "strong",
+  "em",
+  "u",
+  "del",
+  "ul",
+  "ol",
+  "li",
+  "blockquote",
+  "hr",
+  "br",
+  "a",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "th",
+  "td",
+];
+
+export function sanitizePolicyContent(raw: string): string {
+  if (!raw || !raw.trim()) return "";
+  return sanitizeHtml(raw.trim(), {
+    allowedTags: LEGAL_ALLOWED_TAGS,
+    allowedAttributes: {
+      a: ["href", "name", "target", "rel"],
+      th: ["colspan", "rowspan", "align"],
+      td: ["colspan", "rowspan", "align"],
+    },
+    allowedSchemes: ["http", "https", "mailto"],
+    disallowedTagsMode: "discard",
+    transformTags: {
+      a: (tagName, attribs) => {
+        return {
+          tagName: "a",
+          attribs: {
+            ...attribs,
+            rel: "noopener noreferrer",
+            target: "_blank",
+          },
+        };
+      },
+    },
+  });
+}
 
 export class LegalService {
   private isInitialized = false;
@@ -206,6 +260,7 @@ export class LegalService {
     const newVersion =
       dto.version?.trim() || this.incrementMinorVersion(current.version);
     const newTitle = dto.title?.trim() || current.title;
+    const sanitizedContent = sanitizePolicyContent(dto.content);
 
     try {
       await prisma.$executeRawUnsafe(
@@ -222,7 +277,7 @@ export class LegalService {
         current.id || `policy_${type.toLowerCase()}`,
         type,
         newTitle,
-        dto.content,
+        sanitizedContent,
         newVersion,
         adminUserId || null,
       );

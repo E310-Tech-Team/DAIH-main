@@ -118,6 +118,8 @@ export default function ReceptionScannerPage() {
   const [manualQuery, setManualQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<AccessPassDetails[]>([]);
+  const [searchHasExecuted, setSearchHasExecuted] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const [isVerifying, setIsVerifying] = useState(false);
   const [isActionLoading, setIsActionLoading] = useState(false);
@@ -352,14 +354,38 @@ export default function ReceptionScannerPage() {
   // Handle Manual Search
   const handleManualSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!manualQuery.trim()) return;
+    const query = manualQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      setVerificationResult(null);
+      setLastActionNotice(null);
+      setSearchHasExecuted(false);
+      setSearchError(null);
+      return;
+    }
 
     setIsSearching(true);
+    setSearchError(null);
+    setSearchHasExecuted(true);
+    // Reset previous selection/inspection card so stale data is never retained
+    setVerificationResult(null);
+    setLastActionNotice(null);
+
     try {
-      const results = await api.access.searchBookings(manualQuery.trim());
-      setSearchResults(results || []);
-    } catch (err) {
+      const results = await api.access.searchBookings(query);
+      const list = results || [];
+      setSearchResults(list);
+      if (list.length === 0) {
+        setVerificationResult(null);
+      }
+    } catch (err: any) {
       console.warn("Manual search error:", err);
+      setSearchError(
+        err?.message ||
+          "Failed to search reservations. Please check network connection.",
+      );
+      setSearchResults([]);
+      setVerificationResult(null);
     } finally {
       setIsSearching(false);
     }
@@ -705,46 +731,111 @@ export default function ReceptionScannerPage() {
                     type="text"
                     placeholder="Search by name, reference, email, client ID..."
                     value={manualQuery}
-                    onChange={(e) => setManualQuery(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setManualQuery(val);
+                      if (!val.trim()) {
+                        setSearchResults([]);
+                        setVerificationResult(null);
+                        setLastActionNotice(null);
+                        setSearchHasExecuted(false);
+                        setSearchError(null);
+                      }
+                    }}
                     className="flex-1 px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-[#23055c] focus:ring-2 focus:ring-[#23055c] transition-colors"
                   />
                   <button
                     type="submit"
                     disabled={isSearching || !manualQuery.trim()}
-                    className="px-5 py-2.5 bg-[#23055c] hover:bg-[#392271] disabled:opacity-50 text-white font-bold text-xs rounded-xl transition shadow-xs cursor-pointer"
+                    className="px-5 py-2.5 bg-[#23055c] hover:bg-[#392271] disabled:opacity-50 text-white font-bold text-xs rounded-xl transition shadow-xs cursor-pointer flex items-center gap-1.5"
                   >
-                    {isSearching ? "Searching..." : "Search"}
+                    {isSearching && (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    )}
+                    <span>{isSearching ? "Searching..." : "Search"}</span>
                   </button>
                 </form>
 
-                {searchResults.length > 0 ? (
-                  <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
-                    {searchResults.map((b) => (
-                      <div
-                        key={b.bookingId}
-                        onClick={() => handleVerifyPass(b.bookingId)}
-                        className="p-3 bg-[#F8F9FA] hover:bg-[#EBE7F5]/50 border border-slate-200 rounded-xl cursor-pointer transition flex items-center justify-between"
-                      >
-                        <div>
-                          <p className="text-xs font-bold text-[#181c20]">
-                            {b.customerName}
-                          </p>
-                          <p className="text-[11px] text-slate-500">
-                            {b.resourceName} ·{" "}
-                            <span className="font-mono text-[#23055c] font-semibold">
-                              {b.reference}
-                            </span>
-                          </p>
-                        </div>
-                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-white border border-slate-200 text-slate-700 shadow-2xs">
-                          {b.state}
-                        </span>
-                      </div>
-                    ))}
+                {searchError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>{searchError}</span>
+                  </div>
+                )}
+
+                {isSearching ? (
+                  <div className="py-8 text-center text-slate-400 flex flex-col items-center justify-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#23055c]" />
+                    <span className="text-xs font-medium">
+                      Looking up reservations...
+                    </span>
+                  </div>
+                ) : searchResults.length > 0 ? (
+                  <div
+                    className="max-h-60 overflow-y-auto space-y-2 pr-1"
+                    role="listbox"
+                    aria-label="Visitor search results"
+                  >
+                    {searchResults.map((b) => {
+                      const isSelected =
+                        verificationResult?.booking?.bookingId === b.bookingId;
+                      return (
+                        <button
+                          key={b.bookingId}
+                          type="button"
+                          tabIndex={0}
+                          aria-label={`Select visitor ${b.customerName}, resource ${b.resourceName}, reference ${b.reference}`}
+                          onClick={() => handleVerifyPass(b.bookingId)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              handleVerifyPass(b.bookingId);
+                            }
+                          }}
+                          className={`w-full text-left p-3 rounded-xl border transition-all flex items-center justify-between cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#23055c] ${
+                            isSelected
+                              ? "bg-[#EBE7F5] border-[#23055c] ring-1 ring-[#23055c]/30 shadow-xs"
+                              : "bg-[#F8F9FA] hover:bg-[#EBE7F5]/50 border-slate-200"
+                          }`}
+                        >
+                          <div>
+                            <p className="text-xs font-bold text-[#181c20]">
+                              {b.customerName}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              {b.resourceName} ·{" "}
+                              <span className="font-mono text-[#23055c] font-semibold">
+                                {b.reference}
+                              </span>
+                            </p>
+                          </div>
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full text-[10px] font-semibold border shadow-2xs ${
+                              isSelected
+                                ? "bg-white border-[#23055c] text-[#23055c]"
+                                : "bg-white border-slate-200 text-slate-700"
+                            }`}
+                          >
+                            {b.state}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : searchHasExecuted ? (
+                  <div className="py-6 text-center text-slate-500 space-y-1">
+                    <p className="text-xs font-bold text-slate-700">
+                      No Reservations Found
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      No active bookings match &quot;{manualQuery}&quot;. Please
+                      verify the spelling or reference ID.
+                    </p>
                   </div>
                 ) : (
                   <p className="text-[11px] text-slate-500 text-center py-6">
-                    Type a customer keyword to look up reservations.
+                    Type a customer name, booking reference (e.g. DAIH-BK-...),
+                    or email to look up reservations.
                   </p>
                 )}
               </div>

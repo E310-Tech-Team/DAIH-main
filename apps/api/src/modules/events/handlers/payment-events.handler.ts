@@ -1,4 +1,5 @@
 import { OutboxEvent } from "@prisma/client";
+import { prisma } from "../../../db/client.js";
 import { enqueueNotification } from "../../notifications/notifications.queue.js";
 import { notificationsService } from "../../notifications/notifications.service.js";
 import { outboxService } from "../outbox.service.js";
@@ -49,6 +50,99 @@ export async function handlePaymentEvents(event: OutboxEvent): Promise<void> {
       break;
     }
 
+    case "admin.payment_flagged": {
+      try {
+        await prisma.auditLog.create({
+          data: {
+            action: "ADMIN_PAYMENT_FLAGGED",
+            entityType: event.aggregateType,
+            entityId: event.aggregateId,
+            metadata: payload || {},
+          },
+        });
+      } catch (err: any) {
+        console.error(
+          "[AuditLog] Failed to record payment_flagged:",
+          err?.message,
+        );
+      }
+      try {
+        await notificationsService.sendAdminAlert(
+          "Payment Flagged",
+          `Payment for ${payload?.bookingId || event.aggregateId} requires reconciliation: ${payload?.reasonCode || "Flagged"}`,
+          payload,
+        );
+      } catch (err: any) {
+        console.error(
+          "[Alert] Failed to dispatch payment_flagged alert:",
+          err?.message,
+        );
+      }
+      break;
+    }
+
+    case "admin.unknown_payment_reference": {
+      try {
+        await prisma.auditLog.create({
+          data: {
+            action: "ADMIN_UNKNOWN_PAYMENT_REFERENCE",
+            entityType: event.aggregateType,
+            entityId: event.aggregateId,
+            metadata: payload || {},
+          },
+        });
+      } catch (err: any) {
+        console.error(
+          "[AuditLog] Failed to record unknown_payment_reference:",
+          err?.message,
+        );
+      }
+      try {
+        await notificationsService.sendAdminAlert(
+          "Unknown Payment Reference",
+          `Paystack webhook reference ${payload?.reference} could not be matched after retries.`,
+          payload,
+        );
+      } catch (err: any) {
+        console.error(
+          "[Alert] Failed to dispatch unknown_reference alert:",
+          err?.message,
+        );
+      }
+      break;
+    }
+
+    case "admin.system_refund_failed": {
+      try {
+        await prisma.auditLog.create({
+          data: {
+            action: "ADMIN_SYSTEM_REFUND_FAILED",
+            entityType: event.aggregateType,
+            entityId: event.aggregateId,
+            metadata: payload || {},
+          },
+        });
+      } catch (err: any) {
+        console.error(
+          "[AuditLog] Failed to record system_refund_failed:",
+          err?.message,
+        );
+      }
+      try {
+        await notificationsService.sendAdminAlert(
+          "System Refund Failed",
+          `System refund ${event.aggregateId} exhausted retry attempts and failed.`,
+          payload,
+        );
+      } catch (err: any) {
+        console.error(
+          "[Alert] Failed to dispatch system_refund_failed alert:",
+          err?.message,
+        );
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -58,3 +152,12 @@ export async function handlePaymentEvents(event: OutboxEvent): Promise<void> {
 outboxService.registerHandler("payment.successful", handlePaymentEvents);
 outboxService.registerHandler("payment.failed", handlePaymentEvents);
 outboxService.registerHandler("payment.capacity_conflict", handlePaymentEvents);
+outboxService.registerHandler("admin.payment_flagged", handlePaymentEvents);
+outboxService.registerHandler(
+  "admin.unknown_payment_reference",
+  handlePaymentEvents,
+);
+outboxService.registerHandler(
+  "admin.system_refund_failed",
+  handlePaymentEvents,
+);

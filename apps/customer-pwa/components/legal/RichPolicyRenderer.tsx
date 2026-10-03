@@ -1,11 +1,52 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
+import DOMPurify from "dompurify";
 
 interface RichPolicyRendererProps {
   content: string;
   className?: string;
 }
+
+const DOMPURIFY_CONFIG = {
+  ALLOWED_TAGS: [
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "strong",
+    "em",
+    "u",
+    "del",
+    "ul",
+    "ol",
+    "li",
+    "blockquote",
+    "hr",
+    "br",
+    "a",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+  ],
+  ALLOWED_ATTR: [
+    "href",
+    "name",
+    "target",
+    "rel",
+    "colspan",
+    "rowspan",
+    "align",
+  ],
+  ALLOWED_URI_REGEXP:
+    /^(?:(?:(?:f|ht)tps?|mailto):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+};
 
 export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
   content,
@@ -19,16 +60,25 @@ export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
     );
   }
 
-  // If content contains HTML tags from the visual WYSIWYG editor, render directly with styled prose
+  // If content contains HTML tags from the visual WYSIWYG editor, render safely with DOMPurify
   const isHtml =
     /<\/?(h[1-6]|p|div|ul|ol|li|blockquote|table|strong|em|u|del|a|hr|br)[^>]*>/i.test(
       content,
     );
+
+  const cleanHtml = useMemo(() => {
+    if (!isHtml) return "";
+    if (typeof window !== "undefined") {
+      return DOMPurify.sanitize(content, DOMPURIFY_CONFIG);
+    }
+    return content;
+  }, [content, isHtml]);
+
   if (isHtml) {
     return (
       <div
         className={`prose prose-slate max-w-none prose-headings:font-bold prose-headings:text-slate-900 prose-h1:text-2xl sm:prose-h1:text-3xl prose-h2:text-xl prose-h3:text-base prose-p:text-xs sm:prose-p:text-sm prose-p:leading-relaxed prose-li:text-xs sm:prose-li:text-sm prose-a:text-[#23055c] prose-a:font-bold prose-blockquote:border-l-4 prose-blockquote:border-[#23055c] prose-blockquote:bg-purple-50/50 prose-blockquote:rounded-r-xl prose-blockquote:py-1 prose-blockquote:pl-4 ${className}`}
-        dangerouslySetInnerHTML={{ __html: content }}
+        dangerouslySetInnerHTML={{ __html: cleanHtml }}
       />
     );
   }

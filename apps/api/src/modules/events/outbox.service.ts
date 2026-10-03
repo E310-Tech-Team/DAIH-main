@@ -40,31 +40,62 @@ export class OutboxService {
   }
 
   /**
-   * Fetches and dispatches pending events with concurrency protection and exponential backoff
+   * Sweeper to recover events stuck in PROCESSING > 5 minutes back to PENDING
+   */
+  async recoverStuckProcessingEvents(
+    stuckTimeoutMs: number = 5 * 60 * 1000,
+  ): Promise<number> {
+    const cutoff = new Date(Date.now() - stuckTimeoutMs);
+    const result = await prisma.outboxEvent.updateMany({
+      where: {
+        status: OutboxStatus.PROCESSING,
+        lockedAt: { lt: cutoff },
+      },
+      data: {
+        status: OutboxStatus.PENDING,
+        lockedAt: null,
+        workerId: null,
+      },
+    });
+    return result.count;
+  }
+
+  /**
+   * Fetches and dispatches pending events with atomic batch claim (SKIP LOCKED) and exponential backoff
    */
   async processPendingEvents(
     batchSize: number = 25,
+    workerId: string = `outbox-worker-${process.pid}-${Date.now().toString(36)}`,
   ): Promise<{ processed: number; failed: number }> {
-    const now = new Date();
+    // 1. Recover stuck events
+    await this.recoverStuckProcessingEvents();
 
-    const pendingEvents = await prisma.outboxEvent.findMany({
-      where: {
-        status: OutboxStatus.PENDING,
-        scheduledAt: { lte: now },
-        retryCount: { lt: 5 },
-      },
-      orderBy: { createdAt: "asc" },
-      take: batchSize,
-    });
+    // 2. Atomic Batch Claim with SKIP LOCKED
+    const claimedEvents = await prisma.$queryRaw<Array<OutboxEvent>>`
+      UPDATE "outbox_events"
+      SET "status" = 'PROCESSING'::"OutboxStatus",
+          "lockedAt" = NOW(),
+          "workerId" = ${workerId},
+          "attempts" = "attempts" + 1
+      WHERE "id" IN (
+        SELECT "id" FROM "outbox_events"
+        WHERE "status" = 'PENDING'::"OutboxStatus"
+          AND ("scheduledAt" IS NULL OR "scheduledAt" <= NOW())
+        ORDER BY "createdAt" ASC
+        LIMIT ${batchSize}
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING *;
+    `;
 
-    if (pendingEvents.length === 0) {
+    if (!claimedEvents || claimedEvents.length === 0) {
       return { processed: 0, failed: 0 };
     }
 
     let processedCount = 0;
     let failedCount = 0;
 
-    for (const event of pendingEvents) {
+    for (const event of claimedEvents) {
       try {
         // Find registered handlers for this event type
         const matchingHandlers = [
@@ -82,33 +113,36 @@ export class OutboxService {
           data: {
             status: OutboxStatus.PUBLISHED,
             processedAt: new Date(),
+            lockedAt: null,
             error: null,
+            lastError: null,
           },
         });
 
         processedCount++;
       } catch (err: any) {
         failedCount++;
-        const nextRetry = event.retryCount + 1;
-        const backoffSeconds = Math.pow(2, nextRetry) * 5; // 10s, 20s, 40s, 80s
+        const currentAttempts = event.attempts || 1;
+        const isDeadLetter = currentAttempts >= 5;
+        const backoffSeconds = Math.pow(2, currentAttempts) * 1; // 2^attempts * 1s
         const nextScheduledAt = new Date(Date.now() + backoffSeconds * 1000);
-
-        const isTerminalFailure = nextRetry >= 5;
 
         await prisma.outboxEvent.update({
           where: { id: event.id },
           data: {
-            status: isTerminalFailure
-              ? OutboxStatus.FAILED
+            status: isDeadLetter
+              ? OutboxStatus.DEAD_LETTER
               : OutboxStatus.PENDING,
-            retryCount: nextRetry,
             error: err?.message || "Unknown handler failure",
+            lastError: err?.message || "Unknown handler failure",
             scheduledAt: nextScheduledAt,
+            lockedAt: null,
+            workerId: null,
           },
         });
 
         console.error(
-          `❌ Error processing outbox event ${event.id} (${event.eventType}):`,
+          `❌ Error processing outbox event ${event.id} (${event.eventType}, attempt ${currentAttempts}/5):`,
           err?.message,
         );
       }

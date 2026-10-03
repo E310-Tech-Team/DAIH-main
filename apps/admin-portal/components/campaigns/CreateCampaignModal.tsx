@@ -607,7 +607,7 @@ export const CreateCampaignModal: React.FC<CreateCampaignModalProps> = ({
                     className="px-3 py-1.5 rounded-lg bg-purple-100 hover:bg-purple-200 text-[#23055c] font-bold text-[11px] transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Draft with PeeDee AI</span>
+                    <span>Load Campaign Template</span>
                   </button>
                 </div>
 
@@ -615,8 +615,8 @@ export const CreateCampaignModal: React.FC<CreateCampaignModalProps> = ({
                   <div className="bg-purple-50 border border-purple-200 rounded-lg p-2 text-[10px] text-purple-900 flex items-center gap-1.5">
                     <ShieldAlert className="w-3.5 h-3.5 text-[#23055c] shrink-0" />
                     <span>
-                      Drafted with AI. A staff member must approve this copy
-                      before dispatch.
+                      Curated template loaded. Staff approval is required before
+                      campaign dispatch.
                     </span>
                   </div>
                 )}

@@ -31,6 +31,7 @@ interface UserDirectoryTableProps {
   totalCount: number;
   currentPage: number;
   pageSize: number;
+  isLoading?: boolean;
   onPageChange: (page: number) => void;
   onEditUser: (user: AdminUserRecord) => void;
   onToggleStatus: (userId: string) => void;
@@ -42,6 +43,7 @@ export const UserDirectoryTable: React.FC<UserDirectoryTableProps> = ({
   totalCount,
   currentPage,
   pageSize,
+  isLoading = false,
   onPageChange,
   onEditUser,
   onToggleStatus,
@@ -145,7 +147,36 @@ export const UserDirectoryTable: React.FC<UserDirectoryTableProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-[#EBE7F5] text-xs">
-            {users.length === 0 ? (
+            {isLoading ? (
+              Array.from({ length: pageSize || 5 }).map((_, idx) => (
+                <tr
+                  key={idx}
+                  className="border-b border-slate-100 animate-pulse"
+                >
+                  <td className="py-4 px-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-slate-200 shrink-0" />
+                      <div className="space-y-1.5 flex-1">
+                        <div className="h-3.5 bg-slate-200 rounded w-28" />
+                        <div className="h-2.5 bg-slate-100 rounded w-40" />
+                      </div>
+                    </div>
+                  </td>
+                  <td className="py-4 px-6">
+                    <div className="h-5 bg-slate-200 rounded-full w-24" />
+                  </td>
+                  <td className="py-4 px-6">
+                    <div className="h-5 bg-slate-200 rounded-full w-16" />
+                  </td>
+                  <td className="py-4 px-6">
+                    <div className="h-3.5 bg-slate-200 rounded w-20" />
+                  </td>
+                  <td className="py-4 px-6 text-right">
+                    <div className="h-8 bg-slate-100 rounded-lg w-16 ml-auto" />
+                  </td>
+                </tr>
+              ))
+            ) : users.length === 0 ? (
               <tr>
                 <td colSpan={5} className="py-12 text-center text-slate-400">
                   <UserIcon className="w-8 h-8 mx-auto mb-2 text-slate-300" />

@@ -13,44 +13,9 @@ import {
   AdminUserRecord,
 } from "../../components/staff";
 
-const DEFAULT_DEMO_STAFF: AdminUserRecord[] = [
-  {
-    id: "DAIH-STF-001",
-    name: "Sarah Jenkins",
-    email: "s.jenkins@daih.ng",
-    role: UserRole.SUPER_ADMIN,
-    status: "ACTIVE",
-    lastActive: "Just now",
-    phone: "+234 802 123 4567",
-    avatarUrl:
-      "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=256&q=80",
-  },
-  {
-    id: "DAIH-STF-002",
-    name: "Marcus Torres",
-    email: "m.torres@daih.ng",
-    role: UserRole.OPERATIONS_ADMIN,
-    status: "ACTIVE",
-    lastActive: "2 hours ago",
-    phone: "+234 810 555 9988",
-    avatarUrl:
-      "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=256&q=80",
-  },
-  {
-    id: "DAIH-STF-003",
-    name: "Elena Rodriguez",
-    email: "e.rodriguez@daih.ng",
-    role: UserRole.FINANCE_OFFICER,
-    status: "PENDING",
-    lastActive: "Never",
-    phone: "+234 803 777 2211",
-  },
-];
-
 export default function StaffManagementPage() {
-  const [staffList, setStaffList] =
-    useState<AdminUserRecord[]>(DEFAULT_DEMO_STAFF);
-  const [isLoadingStaff, setIsLoadingStaff] = useState(false);
+  const [staffList, setStaffList] = useState<AdminUserRecord[]>([]);
+  const [isLoadingStaff, setIsLoadingStaff] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -78,23 +43,34 @@ export default function StaffManagementPage() {
       setIsLoadingStaff(true);
       try {
         const users = await api.auth.getStaffUsers();
-        if (isMounted && users && Array.isArray(users) && users.length > 0) {
-          const mapped: AdminUserRecord[] = users.map((u: UserProfile) => ({
-            id: u.id || u.clientId,
-            name: `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email,
-            email: u.email,
-            phone: u.phoneNumber,
-            role: u.role as UserRole,
-            status: u.isVerified ? "ACTIVE" : "PENDING",
-            lastActive: u.isVerified
-              ? "Active on Console"
-              : "Pending Activation",
-          }));
-          setStaffList(mapped);
+        if (isMounted) {
+          if (users && Array.isArray(users)) {
+            const mapped: AdminUserRecord[] = users.map((u: UserProfile) => ({
+              id: u.id || u.clientId,
+              name:
+                `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email,
+              email: u.email,
+              phone: u.phoneNumber,
+              role: u.role as UserRole,
+              status: u.isVerified ? "ACTIVE" : "PENDING",
+              lastActive: u.isVerified
+                ? "Active on Console"
+                : "Pending Activation",
+            }));
+            setStaffList(mapped);
+          } else {
+            setStaffList([]);
+          }
         }
-      } catch (err) {
-        // Fallback to local default state if network/unauthenticated
+      } catch (err: any) {
         console.warn("Could not load live staff list from backend:", err);
+        if (isMounted) {
+          setStaffList([]);
+          showToast(
+            "Could not load staff list from server. Please verify your connection.",
+            "error",
+          );
+        }
       } finally {
         if (isMounted) setIsLoadingStaff(false);
       }
@@ -334,6 +310,7 @@ export default function StaffManagementPage() {
           totalCount={filteredStaff.length}
           currentPage={currentPage}
           pageSize={pageSize}
+          isLoading={isLoadingStaff}
           onPageChange={setCurrentPage}
           onEditUser={(u) => setEditingStaff(u)}
           onToggleStatus={handleToggleStatus}

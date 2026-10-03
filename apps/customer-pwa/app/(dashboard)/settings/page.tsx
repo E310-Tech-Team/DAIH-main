@@ -28,6 +28,7 @@ import {
   Cake,
   FileText,
   ChevronRight,
+  AlertTriangle,
 } from "lucide-react";
 
 export default function CustomerSettingsPage() {
@@ -79,6 +80,20 @@ export default function CustomerSettingsPage() {
 
   // Remove Avatar Confirmation State
   const [showDeleteAvatarModal, setShowDeleteAvatarModal] = useState(false);
+
+  // Deactivate Account State
+  const [showDeactivateModal, setShowDeactivateModal] = useState(false);
+  const [deactivatePassword, setDeactivatePassword] = useState("");
+  const [deactivateOtp, setDeactivateOtp] = useState("");
+  const [deactivateReason, setDeactivateReason] = useState("");
+  const [deactivateAuthMethod, setDeactivateAuthMethod] = useState<
+    "password" | "otp"
+  >("password");
+  const [isSendingDeactOtp, setIsSendingDeactOtp] = useState(false);
+  const [otpSentMessage, setOtpSentMessage] = useState<string | null>(null);
+  const [deactivateConfirmed, setDeactivateConfirmed] = useState(false);
+  const [isDeactivating, setIsDeactivating] = useState(false);
+  const [deactivateError, setDeactivateError] = useState<string | null>(null);
 
   // Loyalty Wallet & Tier State
   const [wallet, setWallet] = useState<{
@@ -383,6 +398,71 @@ export default function CustomerSettingsPage() {
       navigator.clipboard.writeText(user.clientId);
       setCopiedClientId(true);
       setTimeout(() => setCopiedClientId(false), 2000);
+    }
+  };
+
+  const handleRequestDeactivateOtp = async () => {
+    setIsSendingDeactOtp(true);
+    setDeactivateError(null);
+    setOtpSentMessage(null);
+    try {
+      const res = await api.auth.requestDeactivationOtp();
+      setOtpSentMessage(
+        res.message || "A 6-digit confirmation code was sent to your email.",
+      );
+      toast.success("Verification code sent to your email.", {
+        title: "Code Sent",
+      });
+    } catch (err: any) {
+      const msg =
+        err?.message || "Failed to send verification code. Please try again.";
+      setDeactivateError(msg);
+      toast.error(msg, { title: "Error" });
+    } finally {
+      setIsSendingDeactOtp(false);
+    }
+  };
+
+  const handleConfirmDeactivation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!deactivateConfirmed) return;
+    setIsDeactivating(true);
+    setDeactivateError(null);
+
+    try {
+      await api.auth.deactivateAccount({
+        password:
+          deactivateAuthMethod === "password" ? deactivatePassword : undefined,
+        otp: deactivateAuthMethod === "otp" ? deactivateOtp.trim() : undefined,
+        reason: deactivateReason || undefined,
+      });
+
+      toast.success(
+        "Your account has been deactivated. You have been logged out.",
+        {
+          title: "Account Closed",
+        },
+      );
+      await logout();
+      window.location.href = "/login";
+    } catch (err: any) {
+      let msg = err?.message || "Failed to deactivate account.";
+      if (msg.includes("ACTIVE_BOOKING_PREVENTS_CLOSURE")) {
+        msg =
+          "You have active upcoming bookings. Please cancel or complete them before deactivating your account.";
+      } else if (msg.includes("OPEN_REFUND_PREVENTS_CLOSURE")) {
+        msg =
+          "You have an open refund request under review. Please await resolution before closing your account.";
+      } else if (msg.includes("INVALID_CREDENTIALS")) {
+        msg = "Incorrect password. Please verify your password.";
+      } else if (msg.includes("INVALID_OTP") || msg.includes("OTP_EXPIRED")) {
+        msg =
+          "Invalid or expired verification code. Please request a new code.";
+      }
+      setDeactivateError(msg);
+      toast.error(msg, { title: "Deactivation Failed" });
+    } finally {
+      setIsDeactivating(false);
     }
   };
 
@@ -885,6 +965,34 @@ export default function CustomerSettingsPage() {
             </div>
           </div>
 
+          {/* Danger Zone: Account Deactivation */}
+          <div className="bg-rose-50/60 rounded-3xl border border-rose-200/80 p-5 sm:p-6 shadow-xs space-y-3">
+            <div className="flex items-center gap-2 text-rose-700">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <h2 className="text-sm font-bold">Danger Zone</h2>
+            </div>
+            <p className="text-xs text-rose-700/80 leading-relaxed">
+              Deactivating your account will immediately revoke all active
+              sessions, release unconfirmed holds, and forfeit any remaining
+              coin balances.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setDeactivateError(null);
+                setOtpSentMessage(null);
+                setDeactivatePassword("");
+                setDeactivateOtp("");
+                setDeactivateConfirmed(false);
+                setShowDeactivateModal(true);
+              }}
+              className="w-full py-2.5 bg-white hover:bg-rose-50 border border-rose-300 text-rose-700 font-bold text-xs rounded-xl transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-xs"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+              <span>Deactivate Account</span>
+            </button>
+          </div>
+
           {/* Logout Action Button */}
           <div>
             <button
@@ -1006,6 +1114,194 @@ export default function CustomerSettingsPage() {
         }}
         onCropComplete={handleCropComplete}
       />
+
+      {/* Deactivate Account Modal */}
+      {showDeactivateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 shadow-2xl border border-slate-100 space-y-5 animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-6 h-6 text-rose-600" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-extrabold text-slate-900">
+                  Deactivate Your Account
+                </h3>
+                <p className="text-xs text-slate-500">
+                  This action disables your DAIH access. Any unspent coins will
+                  be forfeited.
+                </p>
+              </div>
+            </div>
+
+            {deactivateError && (
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{deactivateError}</span>
+              </div>
+            )}
+
+            {otpSentMessage && (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-medium flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{otpSentMessage}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmDeactivation} className="space-y-4">
+              {/* Auth Mode Toggle if user has password */}
+              {user?.hasPassword !== false && (
+                <div className="flex rounded-xl bg-slate-100 p-1 text-xs font-bold text-slate-600">
+                  <button
+                    type="button"
+                    onClick={() => setDeactivateAuthMethod("password")}
+                    className={`flex-1 py-1.5 rounded-lg transition-all ${
+                      deactivateAuthMethod === "password"
+                        ? "bg-white text-slate-900 shadow-xs"
+                        : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    Confirm with Password
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeactivateAuthMethod("otp");
+                      if (!otpSentMessage && !isSendingDeactOtp) {
+                        handleRequestDeactivateOtp();
+                      }
+                    }}
+                    className={`flex-1 py-1.5 rounded-lg transition-all ${
+                      deactivateAuthMethod === "otp"
+                        ? "bg-white text-slate-900 shadow-xs"
+                        : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    Confirm with Email OTP
+                  </button>
+                </div>
+              )}
+
+              {deactivateAuthMethod === "password" &&
+              user?.hasPassword !== false ? (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Account Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={deactivatePassword}
+                    onChange={(e) => setDeactivatePassword(e.target.value)}
+                    placeholder="Enter your current password"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-500 transition-all"
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-700">
+                      6-Digit Security Code
+                    </label>
+                    <button
+                      type="button"
+                      disabled={isSendingDeactOtp}
+                      onClick={handleRequestDeactivateOtp}
+                      className="text-[11px] font-bold text-[#23055c] hover:underline disabled:opacity-50"
+                    >
+                      {isSendingDeactOtp ? "Sending code..." : "Resend Code"}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    maxLength={6}
+                    value={deactivateOtp}
+                    onChange={(e) => setDeactivateOtp(e.target.value)}
+                    placeholder="Enter 6-digit OTP from email"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono font-bold tracking-widest text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-500 transition-all text-center"
+                  />
+                </div>
+              )}
+
+              {/* Optional Reason */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Reason for leaving (Optional)
+                </label>
+                <select
+                  value={deactivateReason}
+                  onChange={(e) => setDeactivateReason(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-rose-500 transition-all"
+                >
+                  <option value="">Select a reason...</option>
+                  <option value="Temporary break">
+                    Taking a temporary break
+                  </option>
+                  <option value="Relocating">Relocating out of area</option>
+                  <option value="No longer need workspace">
+                    No longer need workspace
+                  </option>
+                  <option value="Switching to another provider">
+                    Switching to another provider
+                  </option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              {/* Confirmation Checkbox */}
+              <div className="pt-1">
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={deactivateConfirmed}
+                    onChange={(e) => setDeactivateConfirmed(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300 text-rose-600 focus:ring-rose-500"
+                  />
+                  <span className="text-xs text-slate-600 font-medium leading-tight">
+                    I understand that all active sessions will be terminated,
+                    any remaining coin balance will be forfeited, and
+                    reactivation requires contacting Support.
+                  </span>
+                </label>
+              </div>
+
+              {/* Buttons */}
+              <div className="grid grid-cols-2 gap-3 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowDeactivateModal(false)}
+                  disabled={isDeactivating}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    !deactivateConfirmed ||
+                    isDeactivating ||
+                    (deactivateAuthMethod === "password" &&
+                      !deactivatePassword) ||
+                    (deactivateAuthMethod === "otp" &&
+                      deactivateOtp.length !== 6)
+                  }
+                  className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {isDeactivating ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Deactivating...</span>
+                    </>
+                  ) : (
+                    <span>Confirm Closure</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

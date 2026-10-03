@@ -585,6 +585,9 @@ export default function PlanSelectionAndCheckoutPage() {
   const [checkingAvailability, setCheckingAvailability] = useState(false);
   const [availabilityResult, setAvailabilityResult] =
     useState<AvailabilityResultDTO | null>(null);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(
+    null,
+  );
 
   // Hold & Checkout State
   const [isProcessing, setIsProcessing] = useState(false);
@@ -734,23 +737,17 @@ export default function PlanSelectionAndCheckoutPage() {
         .then((res) => {
           if (isCurrent) {
             setAvailabilityResult(res);
+            setAvailabilityError(null);
           }
         })
         .catch((err) => {
           if (isCurrent) {
             console.warn("Availability check notice:", err);
-            // Default optimistic availability fallback
-            setAvailabilityResult({
-              available: true,
-              resourceId: resource.id || slug,
-              resourceName: resource.name,
-              category: resource.category,
-              capacity: resource.capacity || 1,
-              activeCount: 0,
-              remainingSpots: resource.capacity || 1,
-              startTime: startIso,
-              endTime: endIso,
-            });
+            setAvailabilityResult(null);
+            setAvailabilityError(
+              err?.message ||
+                "Could not confirm workspace availability. Please check your network connection or try again.",
+            );
           }
         })
         .finally(() => {
@@ -915,6 +912,12 @@ export default function PlanSelectionAndCheckoutPage() {
   // Handle Checkout / Hold Creation & Payment Grace Extension
   const handleCheckout = async () => {
     if (!resource || !selectedPlan) return;
+    if (availabilityError) {
+      setErrorMessage(
+        "Workspace availability could not be confirmed. Please check your connection or retry.",
+      );
+      return;
+    }
     if (availabilityResult && !availabilityResult.available) {
       setErrorMessage(
         availabilityResult.reason ||
@@ -1009,7 +1012,7 @@ export default function PlanSelectionAndCheckoutPage() {
   );
 
   const isSlotUnavailable = Boolean(
-    availabilityResult && !availabilityResult.available,
+    (availabilityResult && !availabilityResult.available) || availabilityError,
   );
   const remainingSecs = remainingHoldSeconds ?? 0;
   const holdMinutes = Math.floor(remainingSecs / 60);
@@ -1375,6 +1378,11 @@ export default function PlanSelectionAndCheckoutPage() {
                       <Loader2 className="h-3 w-3 animate-spin text-[#23055c]" />
                       <span>Checking slot...</span>
                     </div>
+                  ) : availabilityError ? (
+                    <div className="flex items-center gap-1.5 text-amber-800 text-xs font-bold px-3 py-1 bg-amber-50 border border-amber-200 rounded-full">
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-600" />
+                      <span>Availability Unconfirmed</span>
+                    </div>
                   ) : availabilityResult?.available ? (
                     <div className="flex items-center gap-1.5 text-emerald-700 text-xs font-bold px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full">
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
@@ -1406,6 +1414,43 @@ export default function PlanSelectionAndCheckoutPage() {
                 blackouts={resource?.blackouts}
                 calendarData={calendarData}
               />
+
+              {availabilityError && (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-medium flex items-center justify-between gap-3 animate-in fade-in">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>{availabilityError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCheckingAvailability(true);
+                      setAvailabilityError(null);
+                      api.bookings
+                        .checkAvailability({
+                          resourceId: resource?.id || slug,
+                          startTime: startIso,
+                          endTime: endIso,
+                        })
+                        .then((res) => {
+                          setAvailabilityResult(res);
+                          setAvailabilityError(null);
+                        })
+                        .catch((err) => {
+                          setAvailabilityResult(null);
+                          setAvailabilityError(
+                            err?.message ||
+                              "Could not confirm availability. Please check your network.",
+                          );
+                        })
+                        .finally(() => setCheckingAvailability(false));
+                    }}
+                    className="text-xs font-bold text-[#23055c] hover:underline shrink-0 cursor-pointer bg-white px-3 py-1.5 rounded-lg border border-amber-300 shadow-2xs"
+                  >
+                    Retry Check
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1680,7 +1725,9 @@ export default function PlanSelectionAndCheckoutPage() {
                 Boolean(isProcessing) ||
                 !selectedPlan ||
                 Boolean(isSlotUnavailable) ||
-                Boolean(isHoldExpired)
+                Boolean(isHoldExpired) ||
+                Boolean(checkingAvailability) ||
+                Boolean(availabilityError)
               }
               onClick={handleCheckout}
               className="w-full bg-[#23055c] hover:bg-[#392271] text-white font-bold text-xs py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1689,6 +1736,15 @@ export default function PlanSelectionAndCheckoutPage() {
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" /> Processing
                   Hold...
+                </>
+              ) : checkingAvailability ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Verifying
+                  Availability...
+                </>
+              ) : availabilityError ? (
+                <>
+                  <AlertCircle className="h-4 w-4" /> Availability Unconfirmed
                 </>
               ) : isSlotUnavailable ? (
                 <>

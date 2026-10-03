@@ -1,7 +1,10 @@
 import express, { Router } from "express";
 import { authenticate } from "../../middleware/auth.middleware.js";
-import { requireRoles } from "../../middleware/rbac.middleware.js";
-import { UserRole } from "@daih/types";
+import {
+  requireRoles,
+  requirePermission,
+} from "../../middleware/rbac.middleware.js";
+import { UserRole, Permission } from "@daih/types";
 import {
   validateParams,
   validateBody,
@@ -53,11 +56,7 @@ paymentsRouter.get("/history", authenticate, paymentsController.getHistory);
 paymentsRouter.get(
   "/admin/transactions",
   authenticate,
-  requireRoles([
-    UserRole.FINANCE_OFFICER,
-    UserRole.SUPER_ADMIN,
-    UserRole.MANAGEMENT_VIEWER,
-  ]),
+  requirePermission(Permission.PAYMENTS_READ_FULL),
   validateQuery(TransactionFilterQuerySchema),
   paymentsController.getAdminTransactions,
 );
@@ -66,11 +65,7 @@ paymentsRouter.get(
 paymentsRouter.get(
   "/admin/reconciliation",
   authenticate,
-  requireRoles([
-    UserRole.FINANCE_OFFICER,
-    UserRole.SUPER_ADMIN,
-    UserRole.MANAGEMENT_VIEWER,
-  ]),
+  requirePermission(Permission.PAYMENTS_READ_SUMMARY),
   validateQuery(ReconciliationQuerySchema),
   paymentsController.getReconciliation,
 );
@@ -79,11 +74,7 @@ paymentsRouter.get(
 paymentsRouter.get(
   "/admin/daily-summary",
   authenticate,
-  requireRoles([
-    UserRole.FINANCE_OFFICER,
-    UserRole.SUPER_ADMIN,
-    UserRole.MANAGEMENT_VIEWER,
-  ]),
+  requirePermission(Permission.PAYMENTS_READ_SUMMARY),
   validateQuery(DailySummaryQuerySchema),
   paymentsController.getDailySummary,
 );
@@ -158,7 +149,7 @@ paymentsRouter.get(
 paymentsRouter.post(
   "/admin/refunds/:id/request-info",
   authenticate,
-  requireRoles([UserRole.FINANCE_OFFICER, UserRole.SUPER_ADMIN]),
+  requirePermission(Permission.PAYMENTS_REFUND),
   validateParams(RefundRequestIdParamsSchema),
   validateBody(RequestInfoBodySchema),
   paymentsController.requestRefundInfo,
@@ -178,7 +169,7 @@ paymentsRouter.post(
 paymentsRouter.post(
   "/admin/refunds/:id/approve",
   authenticate,
-  requireRoles([UserRole.FINANCE_OFFICER, UserRole.SUPER_ADMIN]),
+  requirePermission(Permission.PAYMENTS_REFUND),
   validateParams(RefundRequestIdParamsSchema),
   paymentsController.approveRefund,
 );
@@ -187,7 +178,7 @@ paymentsRouter.post(
 paymentsRouter.post(
   "/admin/refunds/:id/reject",
   authenticate,
-  requireRoles([UserRole.FINANCE_OFFICER, UserRole.SUPER_ADMIN]),
+  requirePermission(Permission.PAYMENTS_REFUND),
   validateParams(RefundRequestIdParamsSchema),
   validateBody(RejectRefundBodySchema),
   paymentsController.rejectRefund,

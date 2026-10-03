@@ -9,6 +9,8 @@ import "../modules/events/handlers/loyalty-events.handler.js";
 import { notificationWorker } from "../modules/notifications/notification-dispatch.job.js";
 import { bookingService } from "../modules/booking/booking.service.js";
 import { bookingRepository } from "../modules/booking/booking.repository.js";
+import { webhookProcessorWorker } from "./webhook-processor.worker.js";
+import { refundSweeperWorker } from "./refund-sweeper.worker.js";
 
 console.log("👷 DAIH Background Job Worker initializing...");
 
@@ -256,6 +258,48 @@ export async function runRfmScoringCycle() {
 setTimeout(runRfmScoringCycle, 300000);
 const rfmInterval = setInterval(runRfmScoringCycle, 24 * 60 * 60 * 1000);
 
+// Webhook event processor loop (every 5 seconds)
+let isProcessingWebhooks = false;
+export async function runWebhookCycle() {
+  if (isProcessingWebhooks) return;
+  isProcessingWebhooks = true;
+  try {
+    const result = await webhookProcessorWorker.processPendingEvents(25);
+    if (result.processed > 0 || result.failed > 0 || result.retried > 0) {
+      console.log(
+        `⚡ Webhook worker: ${result.processed} processed, ${result.failed} failed, ${result.retried} retried`,
+      );
+    }
+  } catch (err: any) {
+    console.error("Webhook worker error:", err?.message);
+  } finally {
+    isProcessingWebhooks = false;
+  }
+}
+setTimeout(runWebhookCycle, 2000);
+const webhookInterval = setInterval(runWebhookCycle, 5000);
+
+// System refund sweeper loop (every 15 seconds)
+let isSweepingRefunds = false;
+export async function runRefundSweepCycle() {
+  if (isSweepingRefunds) return;
+  isSweepingRefunds = true;
+  try {
+    const result = await refundSweeperWorker.sweepSystemRefunds(10);
+    if (result.processed > 0 || result.failed > 0) {
+      console.log(
+        `💸 System refund sweeper: ${result.processed} processed, ${result.failed} failed`,
+      );
+    }
+  } catch (err: any) {
+    console.error("System refund sweeper error:", err?.message);
+  } finally {
+    isSweepingRefunds = false;
+  }
+}
+setTimeout(runRefundSweepCycle, 5000);
+const refundSweepInterval = setInterval(runRefundSweepCycle, 15000);
+
 process.on("SIGTERM", async () => {
   console.log("Stopping worker gracefully...");
   clearInterval(sweepInterval);
@@ -265,6 +309,8 @@ process.on("SIGTERM", async () => {
   clearInterval(coinExpiryInterval);
   clearInterval(quietHoursInterval);
   clearInterval(rfmInterval);
+  clearInterval(webhookInterval);
+  clearInterval(refundSweepInterval);
   await holdExpiryWorker.close();
   await notificationWorker.close();
 });
