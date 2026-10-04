@@ -108,18 +108,18 @@ done
 
 Paste those five into `.env`, then set by hand:
 
-| Variable                                                                  | Value                                                                                                        |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `NODE_ENV`                                                                | `production`                                                                                                 |
-| `DATABASE_URL`                                                            | with your new Postgres password                                                                              |
-| `COOKIE_DOMAIN`                                                           | `.daih.ng`                                                                                                   |
-| `COOKIE_SECURE`                                                           | `true`                                                                                                       |
-| `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD`                              | your real first admin — change the password after first login                                                |
-| `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY` / `PAYSTACK_WEBHOOK_SECRET` | live values                                                                                                  |
-| `RESEND_API_KEY` / `RESEND_FROM_EMAIL`                                    | live values                                                                                                  |
-| `EMAIL_PROVIDER`                                                          | `resend`                                                                                                     |
-| `GOOGLE_CLIENT_ID` / `NEXT_PUBLIC_GOOGLE_CLIENT_ID`                       | from Google Cloud Console → Credentials → OAuth 2.0 Client IDs. No client secret — this is the ID-token flow |
-| `SENTRY_DSN`                                                              | if using Sentry                                                                                              |
+| Variable                                            | Value                                                                                                        |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`                                          | `production`                                                                                                 |
+| `DATABASE_URL`                                      | with your new Postgres password                                                                              |
+| `COOKIE_DOMAIN`                                     | `.daih.ng`                                                                                                   |
+| `COOKIE_SECURE`                                     | `true`                                                                                                       |
+| `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD`        | your real first admin — change the password after first login                                                |
+| `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY`       | live values (webhooks are verified with the secret key; payments stay disabled until it is real)             |
+| `RESEND_API_KEY` / `RESEND_FROM_EMAIL`              | live values                                                                                                  |
+| `EMAIL_PROVIDER`                                    | `resend`                                                                                                     |
+| `GOOGLE_CLIENT_ID` / `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | from Google Cloud Console → Credentials → OAuth 2.0 Client IDs. No client secret — this is the ID-token flow |
+| `SENTRY_DSN`                                        | if using Sentry                                                                                              |
 
 **Verify:** `grep -c "replace-with\|xxx\|YOUR_" .env` returns **0**. Any remaining placeholder is a bug waiting to surface in production.
 

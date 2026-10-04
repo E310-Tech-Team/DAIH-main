@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import { config } from "../../config/env.js";
+import { isRealPaystackSecretKey } from "./paystack-key.js";
 
 export interface PaystackWebhookRequest extends Request {
   paystackEvent?: any;
@@ -25,11 +26,20 @@ export function verifyPaystackWebhookSignature(
     return res.status(401).json({ error: "Missing signature header" });
   }
 
-  const secret = config.paystack.webhookSecret || config.paystack.secretKey;
+  // Paystack signs webhooks with the account's secret key; there is no separate webhook secret.
+  const secret = config.paystack.secretKey;
+
+  // A template or mock key is public (it ships in the repo), so signatures made with it prove nothing.
+  if (config.env === "production" && !isRealPaystackSecretKey(secret)) {
+    console.error(
+      "❌ Paystack webhook rejected: PAYSTACK_SECRET_KEY is missing or a placeholder",
+    );
+    return res.status(503).json({ error: "Payments are not configured" });
+  }
 
   if (!secret) {
     console.error(
-      "❌ Paystack webhook rejected: Server webhook secret not configured",
+      "❌ Paystack webhook rejected: PAYSTACK_SECRET_KEY not configured",
     );
     return res
       .status(500)

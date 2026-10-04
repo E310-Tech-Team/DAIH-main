@@ -523,6 +523,64 @@ export class PaymentsService {
               message: "Payment failed on gateway",
             };
           }
+
+          // The gateway must report exactly the charge this transaction asked for.
+          const expectedKobo = Math.round(Number(txRecord.amount) * 100);
+          const paidKobo = Number(gatewayPayload.amount);
+          const expectedReference =
+            txRecord.paystackReference || txRecord.reference;
+          const gatewayMismatch =
+            !Number.isFinite(paidKobo) ||
+            Math.round(paidKobo) !== expectedKobo ||
+            (gatewayPayload.currency !== undefined &&
+              String(gatewayPayload.currency).toUpperCase() !==
+                txRecord.currency.toUpperCase()) ||
+            (gatewayPayload.reference !== undefined &&
+              gatewayPayload.reference !== expectedReference);
+          if (gatewayMismatch) {
+            await tx.transaction.update({
+              where: { id: txRecord.id },
+              data: {
+                status: PaymentStatus.REQUIRES_RECONCILIATION,
+                gatewayResponse: gatewayPayload,
+              },
+            });
+            await tx.auditLog.create({
+              data: {
+                userId: txRecord.userId,
+                action: "PAYMENT_GATEWAY_MISMATCH",
+                entityType: "Transaction",
+                entityId: txRecord.id,
+                metadata: {
+                  reference: txRecord.reference,
+                  expectedKobo,
+                  reportedKobo: Number.isFinite(paidKobo) ? paidKobo : null,
+                  expectedCurrency: txRecord.currency,
+                  reportedCurrency: gatewayPayload.currency ?? null,
+                  reportedReference: gatewayPayload.reference ?? null,
+                },
+              },
+            });
+            await outboxService.recordEvent(
+              {
+                eventType: "admin.payment_flagged",
+                aggregateType: "Transaction",
+                aggregateId: txRecord.id,
+                payload: {
+                  transactionId: txRecord.id,
+                  bookingId: txRecord.bookingId,
+                  reasonCode: "GATEWAY_MISMATCH",
+                },
+              },
+              tx,
+            );
+            return {
+              status: PaymentStatus.REQUIRES_RECONCILIATION,
+              confirmed: false,
+              reference: txRecord.reference,
+              message: "Gateway charge does not match the transaction",
+            };
+          }
         }
 
         // 2. Fetch Booking Under Lock (Hierarchical Lock Order: Step 2 = Booking)
@@ -1300,9 +1358,21 @@ export class PaymentsService {
     }
 
     if (event.event === "charge.success") {
+      // A webhook is only a notification: confirm the charge with Paystack before treating
+      // it as paid, so a forged or replayed payload can never confirm a booking on its own.
+      const verified = await this.paystack.verifyTransaction(
+        reference,
+        Math.round(Number(transaction.amount) * 100),
+      );
+      if (!verified?.data || verified.data.status !== "success") {
+        console.warn(
+          `⚠️ charge.success webhook for '${reference}' not confirmed by Paystack (status: ${verified?.data?.status ?? "not found"})`,
+        );
+        return { received: true, processed: false, unverified: true };
+      }
       const result = await this.reconcilePaymentTransaction(
         transaction.id,
-        event.data,
+        verified.data,
         eventId,
       );
       return { received: true, processed: true, ...result };
@@ -1405,6 +1475,7 @@ export class PaymentsService {
       try {
         const verifyRes = await this.paystack.verifyTransaction(
           tx.paystackReference,
+          Math.round(Number(tx.amount) * 100),
         );
         if (verifyRes && verifyRes.data) {
           if (verifyRes.data.status === "success") {

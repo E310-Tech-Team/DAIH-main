@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
+import { isRealPaystackSecretKey } from "../modules/payments/paystack-key.js";
 
 // Find and load root .env as the primary source of truth
 const cwd = process.cwd();
@@ -162,7 +163,6 @@ export const config = {
   paystack: {
     secretKey: process.env.PAYSTACK_SECRET_KEY || "sk_test_mock",
     publicKey: process.env.PAYSTACK_PUBLIC_KEY || "pk_test_mock",
-    webhookSecret: process.env.PAYSTACK_WEBHOOK_SECRET || "wh_sec_mock",
   },
   security: {
     alertWebhookUrl: process.env.SECURITY_ALERT_WEBHOOK_URL || "",
@@ -240,6 +240,19 @@ export function validateProductionConfig(): void {
     ) {
       throw new Error(
         "FATAL SECURITY ERROR: QR_SIGNING_SECRET must be explicitly set, independent from JWT_SECRET, and at least 32 characters long in production.",
+      );
+    }
+
+    // Not fatal: the rest of the platform keeps running, but the Paystack client and
+    // webhook verifier refuse to take or confirm payments until a real key is set.
+    if (!isRealPaystackSecretKey(config.paystack.secretKey)) {
+      console.error(
+        "⚠️ PAYSTACK_SECRET_KEY is missing or a placeholder: payments and Paystack webhooks are disabled until it is set.",
+      );
+    }
+    if (process.env.PAYSTACK_WEBHOOK_SECRET) {
+      console.warn(
+        "PAYSTACK_WEBHOOK_SECRET is no longer used: webhooks are verified with PAYSTACK_SECRET_KEY.",
       );
     }
   }

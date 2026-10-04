@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import QRCode from "qrcode";
 import { prisma } from "../../db/client.js";
 import { config } from "../../config/env.js";
 
@@ -230,7 +231,11 @@ export class MfaService {
     const encodedAccount = encodeURIComponent(email);
     const otpauthUri = `otpauth://totp/${encodedIssuer}:${encodedAccount}?secret=${secret}&issuer=${encodedIssuer}&algorithm=SHA1&digits=6&period=30`;
 
-    const qrCodeDataUri = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(otpauthUri)}`;
+    // Rendered here, never by a third-party QR service: the URI contains the TOTP secret.
+    const qrCodeDataUri = await QRCode.toDataURL(otpauthUri, {
+      width: 240,
+      margin: 1,
+    });
 
     // Format secret in groups of 4 for human readability (copy-paste into app)
     const manualEntryKey = secret.match(/.{1,4}/g)!.join(" ");

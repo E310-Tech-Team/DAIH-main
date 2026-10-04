@@ -430,4 +430,102 @@ describe("Strict Payment Reconciliation & State Machine (DAIH-QA-07)", () => {
     });
     expect(refund?.reasonCode).toBe(RefundReasonCode.UNAVAILABLE_RESOURCE);
   });
+
+  describe("Gateway guard: the charge Paystack reports must match the transaction", () => {
+    async function createLiveHold(suffix: string) {
+      const booking = await prisma.booking.create({
+        data: {
+          reference: `DAIH-BK-${Date.now()}-${suffix}`,
+          userId: testUserId,
+          resourceId: testResourceId,
+          startTime: new Date(Date.now() + 3600 * 1000),
+          endTime: new Date(Date.now() + 7200 * 1000),
+          totalAmount: new Decimal("1000.00"),
+          cashDue: new Decimal("1000.00"),
+          state: BookingState.HELD,
+          holdExpiresAt: new Date(Date.now() + 600 * 1000),
+        },
+      });
+      createdBookingIds.push(booking.id);
+
+      const tx = await prisma.transaction.create({
+        data: {
+          reference: `DAIH-TX-${Date.now()}-${suffix}`,
+          bookingId: booking.id,
+          userId: testUserId,
+          amount: new Decimal("1000.00"),
+          status: PaymentStatus.PENDING,
+        },
+      });
+      createdTransactionIds.push(tx.id);
+      return { booking, tx };
+    }
+
+    async function expectHeldForReconciliation(
+      bookingId: string,
+      txId: string,
+    ) {
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+      });
+      expect(booking?.state).toBe(BookingState.HELD);
+      expect(booking?.qrToken).toBeNull();
+
+      const invoice = await prisma.invoice.findUnique({
+        where: { transactionId: txId },
+      });
+      expect(invoice).toBeNull();
+
+      // Not auto-refunded: nothing proves the money moved, so staff review it.
+      const refund = await prisma.refundRequest.findFirst({
+        where: { transactionId: txId },
+      });
+      expect(refund).toBeNull();
+    }
+
+    it("does not confirm when the gateway reports a smaller amount", async () => {
+      const { booking, tx } = await createLiveHold("UNDERPAID");
+
+      const result = await paymentsService.reconcilePaymentTransaction(tx.id, {
+        status: "success",
+        amount: 100,
+        currency: "NGN",
+        reference: tx.reference,
+      });
+
+      expect(result.status).toBe(PaymentStatus.REQUIRES_RECONCILIATION);
+      expect(result.confirmed).toBe(false);
+      await expectHeldForReconciliation(booking.id, tx.id);
+    });
+
+    it("does not confirm when the gateway reports a different currency", async () => {
+      const { booking, tx } = await createLiveHold("CURRENCY");
+
+      const result = await paymentsService.reconcilePaymentTransaction(tx.id, {
+        status: "success",
+        amount: 100000,
+        currency: "USD",
+        reference: tx.reference,
+      });
+
+      expect(result.status).toBe(PaymentStatus.REQUIRES_RECONCILIATION);
+      expect(result.confirmed).toBe(false);
+      await expectHeldForReconciliation(booking.id, tx.id);
+    });
+
+    it("does not confirm when the gateway reports another transaction's reference", async () => {
+      const { booking, tx } = await createLiveHold("REFERENCE");
+
+      const result = await paymentsService.reconcilePaymentTransaction(tx.id, {
+        status: "success",
+        amount: 100000,
+        currency: "NGN",
+        reference: "DAIH-PAY-SOMEONE-ELSE",
+      });
+
+      expect(result.status).toBe(PaymentStatus.REQUIRES_RECONCILIATION);
+      expect(result.confirmed).toBe(false);
+      await expectHeldForReconciliation(booking.id, tx.id);
+    });
+  });
 });
