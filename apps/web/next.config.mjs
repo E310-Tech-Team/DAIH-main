@@ -42,6 +42,12 @@ const securityHeaders = [
   },
 ];
 
+// Mirrors CUSTOMER_PORTAL_URL in lib/config.ts (this file can't import TS).
+const customerPortalUrl =
+  process.env.NEXT_PUBLIC_CUSTOMER_PORTAL_URL ||
+  process.env.NEXT_PUBLIC_CUSTOMER_PWA_URL ||
+  "http://localhost:3001";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   poweredByHeader: false,
@@ -51,6 +57,23 @@ const nextConfig = {
       {
         source: "/:path*",
         headers: securityHeaders,
+      },
+    ];
+  },
+  async redirects() {
+    // The customer portal renders the legal documents; this site's old
+    // /privacy and /terms pages showed raw Markdown. Temporary (307) so the
+    // pages can move back here later without browsers caching the redirect.
+    return [
+      {
+        source: "/privacy",
+        destination: `${customerPortalUrl}/privacy`,
+        permanent: false,
+      },
+      {
+        source: "/terms",
+        destination: `${customerPortalUrl}/terms`,
+        permanent: false,
       },
     ];
   },
