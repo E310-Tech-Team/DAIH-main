@@ -12,7 +12,6 @@
     "PORT",
     "PAYSTACK_SECRET_KEY",
     "PAYSTACK_PUBLIC_KEY",
-    "PAYSTACK_WEBHOOK_SECRET",
     "RESEND_API_KEY",
     "ZEPTOMAIL_API_KEY",
     "SENTRY_DSN",
@@ -47,8 +46,7 @@
         "QR_SIGNING_SECRET",
         "PORT",
         "PAYSTACK_SECRET_KEY",
-        "PAYSTACK_PUBLIC_KEY",
-        "PAYSTACK_WEBHOOK_SECRET"
+        "PAYSTACK_PUBLIC_KEY"
       ]
     },
     "clean": {

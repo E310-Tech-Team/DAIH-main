@@ -400,7 +400,7 @@ ALLOWED_ORIGINS="https://daih.ng,https://app.daih.ng,https://admin.daih.ng,https
 # ─── Payments (Paystack) ─────────────────────────────────────────────────────
 PAYSTACK_SECRET_KEY="sk_live_xxx"
 PAYSTACK_PUBLIC_KEY="pk_live_xxx"
-PAYSTACK_WEBHOOK_SECRET="wh_sec_xxx"
+# Webhooks are verified with PAYSTACK_SECRET_KEY (Paystack signs them with it).
 ```
 
 ### Frontend Applications (`.env` for `admin-portal`, `customer-pwa`, `reception-app`, `web`)

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
@@ -13,6 +13,7 @@ import {
 } from "@daih/types";
 import { RefundReasonCode } from "@prisma/client";
 import { paymentsService } from "./payments.service.js";
+import { paystackClient } from "./paystack.client.js";
 import { webhookProcessorWorker } from "../../jobs/webhook-processor.worker.js";
 
 describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
@@ -31,15 +32,15 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
   let testTransactionReference: string;
 
   const jwtSecret = config.jwt.secret || "dev-secret-key-12345678901234567890";
-  const webhookSecret =
-    config.paystack.webhookSecret || config.paystack.secretKey;
-
   /**
-   * Helper to sign payload with HMAC-SHA512
+   * Helper to sign payload with HMAC-SHA512 using the secret key, as Paystack does
    */
   function signPaystackPayload(payload: any): string {
     const raw = typeof payload === "string" ? payload : JSON.stringify(payload);
-    return crypto.createHmac("sha512", webhookSecret).update(raw).digest("hex");
+    return crypto
+      .createHmac("sha512", config.paystack.secretKey)
+      .update(raw)
+      .digest("hex");
   }
 
   beforeAll(async () => {
@@ -486,6 +487,76 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
         where: { id: failedBooking.id },
       });
       expect(updatedBooking?.state).toBe(BookingState.PENDING_PAYMENT);
+    });
+
+    it("should not confirm a booking from a signed charge.success webhook that Paystack does not confirm", async () => {
+      await prisma.webhookEvent.deleteMany({});
+      const unverifiedBooking = await prisma.booking.create({
+        data: {
+          reference: `DAIH-BK-UNVERIFIED-${Date.now()}`,
+          resourceId: testResourceId,
+          userId: customerUserId,
+          startTime: new Date(Date.now() + 96 * 60 * 60 * 1000),
+          endTime: new Date(Date.now() + 100 * 60 * 60 * 1000),
+          state: BookingState.PENDING_PAYMENT,
+          holdExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          totalAmount: 15000,
+          cashDue: 15000,
+          currency: "NGN",
+        },
+      });
+
+      const unverifiedTxRef = `DAIH-PAY-UNVERIFIED-${Date.now()}`;
+      await prisma.transaction.create({
+        data: {
+          reference: unverifiedTxRef,
+          bookingId: unverifiedBooking.id,
+          userId: customerUserId,
+          amount: 15000,
+          status: PaymentStatus.PENDING,
+          paystackReference: unverifiedTxRef,
+        },
+      });
+
+      // The webhook is correctly signed, but Paystack has no such charge.
+      const verifySpy = vi
+        .spyOn(paystackClient, "verifyTransaction")
+        .mockResolvedValueOnce(null);
+
+      const payload = {
+        event: "charge.success",
+        data: {
+          id: Math.floor(10000000 + Math.random() * 90000000),
+          status: "success",
+          reference: unverifiedTxRef,
+          amount: 1500000,
+          currency: "NGN",
+        },
+      };
+      const rawBody = JSON.stringify(payload);
+
+      await request(app)
+        .post("/api/v1/payments/webhook")
+        .set("x-paystack-signature", signPaystackPayload(rawBody))
+        .set("Content-Type", "application/json")
+        .send(rawBody)
+        .expect(200);
+
+      await webhookProcessorWorker.processPendingEvents();
+
+      expect(verifySpy).toHaveBeenCalledWith(unverifiedTxRef, 1500000);
+      verifySpy.mockRestore();
+
+      const tx = await prisma.transaction.findFirst({
+        where: { reference: unverifiedTxRef },
+      });
+      expect(tx?.status).toBe(PaymentStatus.PENDING);
+
+      const booking = await prisma.booking.findUnique({
+        where: { id: unverifiedBooking.id },
+      });
+      expect(booking?.state).toBe(BookingState.PENDING_PAYMENT);
+      expect(booking?.qrToken).toBeNull();
     });
   });
 

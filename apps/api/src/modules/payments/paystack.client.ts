@@ -1,4 +1,5 @@
 import { config } from "../../config/env.js";
+import { isRealPaystackSecretKey } from "./paystack-key.js";
 
 export interface PaystackInitParams {
   email: string;
@@ -68,23 +69,47 @@ export class PaystackClient {
   }
 
   /**
+   * Deterministic mock responses are for automated tests and local development.
+   * Production always talks to Paystack, so a mock key can never fake a payment there.
+   */
+  private useMock(): boolean {
+    if (config.env === "production") return false;
+    return (
+      !this.secretKey ||
+      this.secretKey.includes("mock") ||
+      config.env === "test"
+    );
+  }
+
+  /** Refuses to call Paystack in production with a missing, template or mock key. */
+  private assertConfigured(): void {
+    if (
+      config.env === "production" &&
+      !isRealPaystackSecretKey(this.secretKey)
+    ) {
+      const err: any = new Error(
+        "Payments are not configured: PAYSTACK_SECRET_KEY is missing or a placeholder",
+      );
+      err.statusCode = 503;
+      err.code = "PAYMENTS_NOT_CONFIGURED";
+      throw err;
+    }
+  }
+
+  /**
    * Initializes a transaction with Paystack
    */
   async initializeTransaction(
     params: PaystackInitParams,
   ): Promise<PaystackInitResult> {
-    // If mock key or test environment without real key, return deterministic mock
-    if (
-      !this.secretKey ||
-      this.secretKey.includes("mock") ||
-      config.env === "test"
-    ) {
+    if (this.useMock()) {
       return {
         authorization_url: `https://checkout.paystack.com/mock-checkout-${params.reference}`,
         access_code: `mock_code_${params.reference}`,
         reference: params.reference,
       };
     }
+    this.assertConfigured();
 
     const payload: Record<string, any> = {
       email: params.email,
@@ -133,17 +158,15 @@ export class PaystackClient {
   }
 
   /**
-   * Verifies a transaction on Paystack
+   * Verifies a transaction on Paystack.
+   * `mockAmountKobo` only shapes the mock response (tests and local development):
+   * it stands in for "Paystack charged what we asked for" and is ignored for real calls.
    */
   async verifyTransaction(
     reference: string,
+    mockAmountKobo?: number,
   ): Promise<PaystackVerifyResult | null> {
-    if (
-      !this.secretKey ||
-      this.secretKey.includes("mock") ||
-      config.env === "test"
-    ) {
-      // Mock response for test/mock environment
+    if (this.useMock()) {
       return {
         status: true,
         message: "Verification successful",
@@ -152,7 +175,7 @@ export class PaystackClient {
           domain: "test",
           status: "success",
           reference,
-          amount: 1000000,
+          amount: mockAmountKobo ?? 1000000,
           gateway_response: "Approved",
           paid_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
@@ -164,6 +187,7 @@ export class PaystackClient {
         },
       };
     }
+    this.assertConfigured();
 
     try {
       const response = await fetch(
@@ -223,11 +247,7 @@ export class PaystackClient {
       refund_reference?: string;
     };
   }> {
-    if (
-      !this.secretKey ||
-      this.secretKey.includes("mock") ||
-      config.env === "test"
-    ) {
+    if (this.useMock()) {
       return {
         status: true,
         message: "Refund has been processed successfully (mock)",
@@ -239,6 +259,7 @@ export class PaystackClient {
         },
       };
     }
+    this.assertConfigured();
 
     try {
       const body: Record<string, any> = {

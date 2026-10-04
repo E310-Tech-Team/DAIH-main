@@ -1,6 +1,7 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useState } from "react";
+import QRCode from "qrcode";
 import { cn } from "../utils/cn";
 
 export interface QRDisplayProps {
@@ -18,9 +19,29 @@ export const QRDisplay: React.FC<QRDisplayProps> = ({
   validUntil,
   className,
 }) => {
-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
-    token,
-  )}`;
+  // Generated on the device: the token is a signed access credential and must
+  // never be sent to a third-party QR service.
+  const [qrSrc, setQrSrc] = useState<string | null>(null);
+  const [qrFailed, setQrFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setQrFailed(false);
+    QRCode.toString(token, { type: "svg", margin: 1 })
+      .then((svg) => {
+        if (!cancelled) {
+          setQrSrc(
+            `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setQrFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   return (
     <div
@@ -38,11 +59,22 @@ export const QRDisplay: React.FC<QRDisplayProps> = ({
       )}
 
       <div className="my-5 p-3 bg-slate-50 rounded-xl border border-slate-200">
-        <img
-          src={qrUrl}
-          alt={`QR Code Access for ${bookingRef || "booking"}`}
-          className="w-48 h-48 object-contain rounded-lg"
-        />
+        {qrSrc && !qrFailed ? (
+          <img
+            src={qrSrc}
+            alt={`QR Code Access for ${bookingRef || "booking"}`}
+            className="w-48 h-48 object-contain rounded-lg"
+          />
+        ) : (
+          <div
+            className={cn(
+              "w-48 h-48 rounded-lg bg-slate-100 flex items-center justify-center text-xs text-slate-500",
+              !qrFailed && "animate-pulse",
+            )}
+          >
+            {qrFailed ? "QR code unavailable" : null}
+          </div>
+        )}
       </div>
 
       {customerName && (
