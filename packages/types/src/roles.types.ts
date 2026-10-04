@@ -18,6 +18,8 @@ export enum Permission {
   QR_SCAN = "qr:scan",
   CHECK_IN_OUT = "checkin_out:manage",
   PAYMENTS_READ = "payments:read",
+  PAYMENTS_READ_SUMMARY = "payments:read_summary",
+  PAYMENTS_READ_FULL = "payments:read_full",
   PAYMENTS_REFUND = "payments:refund",
   REPORTS_VIEW = "reports:view",
   REPORTS_EXPORT = "reports:export",
@@ -48,6 +50,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.BOOKINGS_MANAGE,
     Permission.BOOKINGS_OVERRIDE,
     Permission.RESOURCES_MANAGE,
+    Permission.PAYMENTS_READ_SUMMARY,
     Permission.REPORTS_VIEW,
     Permission.REPORTS_EXPORT,
     Permission.COINS_READ_ALL,
@@ -55,6 +58,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   [UserRole.FINANCE_OFFICER]: [
     Permission.BOOKINGS_READ_ALL,
     Permission.PAYMENTS_READ,
+    Permission.PAYMENTS_READ_SUMMARY,
+    Permission.PAYMENTS_READ_FULL,
     Permission.PAYMENTS_REFUND,
     Permission.REPORTS_VIEW,
     Permission.REPORTS_EXPORT,
@@ -62,6 +67,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.COINS_ADJUST,
   ],
   [UserRole.MANAGEMENT_VIEWER]: [
+    Permission.PAYMENTS_READ_SUMMARY,
     Permission.REPORTS_VIEW,
     Permission.REPORTS_EXPORT,
     Permission.COINS_READ_ALL,

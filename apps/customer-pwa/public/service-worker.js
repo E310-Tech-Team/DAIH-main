@@ -116,3 +116,38 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+// Purge private / API caches on logout or session expiry directive
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "PURGE_PRIVATE_CACHE") {
+    event.waitUntil(
+      caches
+        .keys()
+        .then((cacheNames) =>
+          Promise.all(
+            cacheNames.map(async (name) => {
+              const cache = await caches.open(name);
+              const requests = await cache.keys();
+              return Promise.all(
+                requests.map((request) => {
+                  const url = new URL(request.url);
+                  if (
+                    url.pathname.includes("/api/") ||
+                    url.pathname.includes("/identity/")
+                  ) {
+                    return cache.delete(request);
+                  }
+                  return Promise.resolve(false);
+                }),
+              );
+            }),
+          ),
+        )
+        .then(() => {
+          if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage({ purged: true });
+          }
+        }),
+    );
+  }
+});

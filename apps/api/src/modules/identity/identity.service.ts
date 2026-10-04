@@ -8,6 +8,7 @@ import {
   BookingState,
   CustomerReferralsResponse,
   ReferralItem,
+  getSafeRedirectUrl,
 } from "@daih/types";
 import { prisma } from "../../db/client.js";
 import { config } from "../../config/env.js";
@@ -34,7 +35,17 @@ import {
   GoogleOAuthCallbackDTO,
   GoogleOAuthCallbackResult,
   OnboardingAttributionDTO,
+  DeactivateAccountDTO,
+  ReactivateAccountDTO,
 } from "./identity.types.js";
+import {
+  HoldStatus,
+  RefundStatus,
+  PaymentStatus,
+  CoinLedgerAction,
+} from "@prisma/client";
+import { outboxService } from "../events/outbox.service.js";
+import { redis, isRedisAvailable } from "../../config/redis.js";
 
 /** Roles that must complete MFA before accessing the system */
 const MFA_REQUIRED_ROLES = new Set<UserRole>([
@@ -93,6 +104,7 @@ export class IdentityService {
       hasGoogleLinked: hasGoogle,
       mfaEnabled: Boolean(user.mfaEnabled),
       mfaMethod: (user.mfaMethod as any) || null,
+      deactivatedAt: user.deactivatedAt || null,
     };
   }
 
@@ -150,6 +162,15 @@ export class IdentityService {
 
       if (existingByEmail) {
         user = existingByEmail;
+
+        if ((user as any).deactivatedAt) {
+          const error: any = new Error(
+            "This account has been deactivated. Please contact support to reactivate your account.",
+          );
+          error.code = "ACCOUNT_DEACTIVATED";
+          error.statusCode = 403;
+          throw error;
+        }
 
         // 4. Portal boundary check BEFORE any linking or side-effects!
         const requestedPortal = (
@@ -285,6 +306,14 @@ export class IdentityService {
       }
     } else {
       // User found by googleId -> check portal boundary
+      if ((user as any).deactivatedAt) {
+        const error: any = new Error(
+          "This account has been deactivated. Please contact support to reactivate your account.",
+        );
+        error.code = "ACCOUNT_DEACTIVATED";
+        error.statusCode = 403;
+        throw error;
+      }
       const requestedPortal = (
         dto.portal ||
         context.portal ||
@@ -340,6 +369,7 @@ export class IdentityService {
     referralCode?: string;
     destination?: string;
     portal?: string;
+    codeChallenge?: string;
   }): GoogleOAuthInitResult {
     const codeVerifier = crypto.randomBytes(32).toString("base64url");
     const codeChallenge = crypto
@@ -348,13 +378,18 @@ export class IdentityService {
       .digest("base64url");
 
     const nonce = crypto.randomBytes(16).toString("hex");
+    const safeDestination = getSafeRedirectUrl(
+      options.destination,
+      "/dashboard",
+    );
     const statePayload = {
       nonce,
       ref: options.referralCode
         ? options.referralCode.trim().toUpperCase()
         : undefined,
-      destination: options.destination || "/dashboard",
+      destination: safeDestination,
       portal: options.portal || "customer",
+      clientCodeChallenge: options.codeChallenge || null,
       iat: Date.now(),
     };
 
@@ -548,7 +583,8 @@ export class IdentityService {
       user: authResult.user,
       isNewUser: authResult.isNewUser,
       needsConsent: Boolean(authResult.needsConsent),
-      destination: statePayload.destination || "/dashboard",
+      destination: getSafeRedirectUrl(statePayload.destination, "/dashboard"),
+      clientCodeChallenge: statePayload.clientCodeChallenge || null,
     };
   }
 
@@ -663,6 +699,14 @@ export class IdentityService {
   ): Promise<{ user: UserSummaryDTO; verificationSent: boolean }> {
     const existing = await identityRepository.findByEmail(dto.email);
     if (existing) {
+      if ((existing as any).deactivatedAt) {
+        const error: any = new Error(
+          "An account with this email has been deactivated. Please contact support to reactivate your account.",
+        );
+        error.code = "ACCOUNT_DEACTIVATED";
+        error.statusCode = 403;
+        throw error;
+      }
       const error: any = new Error("An account with this email already exists");
       error.code = "EMAIL_ALREADY_EXISTS";
       error.statusCode = 409;
@@ -826,6 +870,15 @@ export class IdentityService {
         "Please verify your email address before logging in",
       );
       error.code = "EMAIL_NOT_VERIFIED";
+      error.statusCode = 403;
+      throw error;
+    }
+
+    if ((user as any).deactivatedAt) {
+      const error: any = new Error(
+        "This account has been deactivated. Please contact support to reactivate your account.",
+      );
+      error.code = "ACCOUNT_DEACTIVATED";
       error.statusCode = 403;
       throw error;
     }
@@ -1974,6 +2027,365 @@ export class IdentityService {
       activeReferred,
       inactiveReferred,
       referredUsers: items,
+    };
+  }
+
+  /**
+   * Request Email OTP for passwordless / Google-only account deactivation
+   */
+  async requestDeactivationOtp(userId: string) {
+    const user = await identityRepository.findById(userId);
+    if (!user) {
+      const err: any = new Error("User not found");
+      err.statusCode = 404;
+      err.code = "USER_NOT_FOUND";
+      throw err;
+    }
+    if ((user as any).deactivatedAt) {
+      const err: any = new Error("Account is already deactivated");
+      err.statusCode = 400;
+      err.code = "ACCOUNT_ALREADY_DEACTIVATED";
+      throw err;
+    }
+
+    const otp = crypto.randomInt(100000, 999999).toString();
+    const hmacSecret = (config.security as any)?.otpSecret || config.jwt.secret;
+    const hashedOtp = crypto
+      .createHmac("sha256", hmacSecret)
+      .update(otp)
+      .digest("hex");
+
+    if (redis && isRedisAvailable()) {
+      try {
+        await redis.set(`deact_otp:${userId}`, hashedOtp, "EX", 600);
+        await redis.set(`deact_attempts:${userId}`, "0", "EX", 600);
+      } catch (err: any) {
+        console.warn(
+          "[IdentityService] Redis write warning during OTP set:",
+          err?.message,
+        );
+      }
+    }
+
+    try {
+      await enqueueNotification(
+        "auth.deactivation_otp",
+        user.email,
+        user.firstName,
+        {
+          otp,
+          supportEmail: "support@daih.ng",
+        },
+      );
+    } catch (err: any) {
+      console.warn(
+        "[IdentityService] Failed to send deactivation OTP notification:",
+        err?.message,
+      );
+    }
+
+    return {
+      success: true,
+      message:
+        "A 6-digit confirmation code has been sent to your email address.",
+    };
+  }
+
+  /**
+   * Customer Self-Service Account Closure
+   */
+  async deactivateAccount(userId: string, dto: DeactivateAccountDTO) {
+    const user = await identityRepository.findById(userId);
+    if (!user) {
+      const err: any = new Error("User not found");
+      err.statusCode = 404;
+      err.code = "USER_NOT_FOUND";
+      throw err;
+    }
+    if ((user as any).deactivatedAt) {
+      const err: any = new Error("Account is already deactivated");
+      err.statusCode = 400;
+      err.code = "ACCOUNT_ALREADY_DEACTIVATED";
+      throw err;
+    }
+
+    // Authentication Guard
+    if (user.passwordHash) {
+      if (!dto.password) {
+        const err: any = new Error(
+          "Password confirmation is required to close your account.",
+        );
+        err.statusCode = 400;
+        err.code = "PASSWORD_REQUIRED";
+        throw err;
+      }
+      const isValid = await passwordService.verifyPassword(
+        user.passwordHash,
+        dto.password,
+      );
+      if (!isValid) {
+        const err: any = new Error("Incorrect password.");
+        err.statusCode = 400;
+        err.code = "INVALID_PASSWORD";
+        throw err;
+      }
+    } else {
+      if (!dto.otp) {
+        const err: any = new Error(
+          "A 6-digit verification code is required to close your account.",
+        );
+        err.statusCode = 400;
+        err.code = "OTP_REQUIRED";
+        throw err;
+      }
+      if (redis && isRedisAvailable()) {
+        const attempts = parseInt(
+          (await redis.get(`deact_attempts:${userId}`)) || "0",
+          10,
+        );
+        if (attempts >= 3) {
+          const err: any = new Error(
+            "Maximum verification attempts exceeded. Please request a new code.",
+          );
+          err.statusCode = 429;
+          err.code = "OTP_ATTEMPTS_EXCEEDED";
+          throw err;
+        }
+        await redis.incr(`deact_attempts:${userId}`);
+
+        const storedHash = await redis.get(`deact_otp:${userId}`);
+        const hmacSecret =
+          (config.security as any)?.otpSecret || config.jwt.secret;
+        const inputHash = crypto
+          .createHmac("sha256", hmacSecret)
+          .update(dto.otp.trim())
+          .digest("hex");
+        if (!storedHash || storedHash !== inputHash) {
+          const err: any = new Error("Invalid or expired verification code.");
+          err.statusCode = 400;
+          err.code = "INVALID_OTP";
+          throw err;
+        }
+        await redis.del(`deact_otp:${userId}`);
+        await redis.del(`deact_attempts:${userId}`);
+      }
+    }
+
+    // Active/Upcoming Confirmed Bookings Guard
+    const activeBooking = await prisma.booking.findFirst({
+      where: {
+        userId,
+        state: {
+          in: [
+            BookingState.CONFIRMED,
+            BookingState.ACTIVE,
+            BookingState.CHECKED_IN,
+          ],
+        },
+        endTime: { gte: new Date() },
+      },
+    });
+    if (activeBooking) {
+      const err: any = new Error(
+        "Cannot deactivate account with upcoming or active confirmed bookings. Please complete or reschedule your bookings first.",
+      );
+      err.statusCode = 400;
+      err.code = "ACTIVE_BOOKING_PREVENTS_CLOSURE";
+      throw err;
+    }
+
+    // Open Refund Requests Guard
+    const openRefund = await prisma.refundRequest.findFirst({
+      where: {
+        booking: { userId },
+        status: {
+          in: [
+            RefundStatus.PENDING,
+            RefundStatus.PROCESSING,
+            RefundStatus.INFO_REQUESTED,
+            RefundStatus.REQUIRES_RECONCILIATION,
+          ],
+        },
+      },
+    });
+    if (openRefund) {
+      const err: any = new Error(
+        "Cannot deactivate account while a refund request is pending review or processing.",
+      );
+      err.statusCode = 400;
+      err.code = "OPEN_REFUND_PREVENTS_CLOSURE";
+      throw err;
+    }
+
+    // Cancel unconfirmed holds (HELD, PENDING_PAYMENT)
+    const heldBookings = await prisma.booking.findMany({
+      where: {
+        userId,
+        state: { in: [BookingState.HELD, BookingState.PENDING_PAYMENT] },
+      },
+      select: { id: true },
+    });
+    for (const hb of heldBookings) {
+      await prisma.booking.update({
+        where: { id: hb.id },
+        data: { state: BookingState.CANCELLED },
+      });
+      await prisma.transaction.updateMany({
+        where: { bookingId: hb.id, status: PaymentStatus.PENDING },
+        data: { status: PaymentStatus.ABANDONED },
+      });
+      await prisma.coinHold.updateMany({
+        where: { bookingId: hb.id, status: HoldStatus.ACTIVE },
+        data: { status: HoldStatus.RELEASED },
+      });
+    }
+
+    // Forfeit remaining PeeDee coins
+    const coinBalance = await prisma.coinBalance.findUnique({
+      where: { userId },
+    });
+    if (coinBalance && Number(coinBalance.balance) > 0) {
+      const forfeitAmount = Number(coinBalance.balance);
+      await prisma.coinLedgerEntry.create({
+        data: {
+          userId,
+          action: CoinLedgerAction.EXPIRY,
+          amount: -forfeitAmount,
+          balanceAfter: 0,
+          referenceType: "ACCOUNT_CLOSURE",
+          referenceId: userId,
+          idempotencyKey: `deact_coin_forfeit_${userId}_${Date.now()}`,
+          metadata: {
+            reason: "Forfeited on customer account closure",
+          },
+        },
+      });
+      await prisma.coinBalance.update({
+        where: { userId },
+        data: {
+          balance: 0,
+          lifetimeBurned: { increment: forfeitAmount },
+        },
+      });
+    }
+
+    // Mark user deactivatedAt = NOW()
+    const now = new Date();
+    await prisma.user.update({
+      where: { id: userId },
+      data: { deactivatedAt: now },
+    });
+
+    // Revoke all sessions in Postgres & cache
+    await sessionService.revokeAllUserSessions(userId);
+
+    // Set Redis fast-kill key
+    if (redis && isRedisAvailable()) {
+      try {
+        await redis.set(`deactivated_user:${userId}`, "1", "EX", 86400 * 30);
+      } catch (err: any) {
+        console.warn(
+          "[IdentityService] Redis write warning during deactivation:",
+          err?.message,
+        );
+      }
+    }
+
+    // Audit log
+    await prisma.auditLog.create({
+      data: {
+        userId,
+        action: "ACCOUNT_DEACTIVATED",
+        entityType: "User",
+        entityId: userId,
+        metadata: {
+          reason: dto.reason || "Customer self-service deactivation",
+          deactivatedAt: now.toISOString(),
+        },
+      },
+    });
+
+    // Outbox event
+    await outboxService.recordEvent({
+      eventType: "identity.account_deactivated",
+      aggregateType: "User",
+      aggregateId: userId,
+      payload: {
+        userId,
+        email: user.email,
+        deactivatedAt: now.toISOString(),
+      },
+    });
+
+    return {
+      success: true,
+      message: "Account has been successfully deactivated.",
+    };
+  }
+
+  /**
+   * Super Admin Support-Led Account Reactivation
+   */
+  async reactivateAccount(superAdminUserId: string, dto: ReactivateAccountDTO) {
+    const user = await identityRepository.findById(dto.userId);
+    if (!user) {
+      const err: any = new Error("User not found");
+      err.statusCode = 404;
+      err.code = "USER_NOT_FOUND";
+      throw err;
+    }
+    if (!(user as any).deactivatedAt) {
+      const err: any = new Error("Account is not deactivated");
+      err.statusCode = 400;
+      err.code = "ACCOUNT_NOT_DEACTIVATED";
+      throw err;
+    }
+
+    await prisma.user.update({
+      where: { id: dto.userId },
+      data: { deactivatedAt: null },
+    });
+
+    if (redis && isRedisAvailable()) {
+      try {
+        await redis.del(`deactivated_user:${dto.userId}`);
+      } catch (err: any) {
+        console.warn(
+          "[IdentityService] Redis del warning during reactivation:",
+          err?.message,
+        );
+      }
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: superAdminUserId,
+        action: "ACCOUNT_REACTIVATED",
+        entityType: "User",
+        entityId: dto.userId,
+        metadata: {
+          targetEmail: user.email,
+          reason: dto.reason,
+          reactivatedBy: superAdminUserId,
+        },
+      },
+    });
+
+    await outboxService.recordEvent({
+      eventType: "identity.account_reactivated",
+      aggregateType: "User",
+      aggregateId: dto.userId,
+      payload: {
+        userId: dto.userId,
+        email: user.email,
+        reactivatedBy: superAdminUserId,
+        reason: dto.reason,
+      },
+    });
+
+    return {
+      success: true,
+      message: "Account reactivated successfully.",
     };
   }
 }

@@ -34,7 +34,7 @@ export function middleware(request: NextRequest) {
   );
   response.headers.set(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: http://localhost:* ws: wss:; frame-src 'self' https://accounts.google.com/; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self';",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com/gsi/client https://js.paystack.co; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://api.daih.ng https://checkout.paystack.com https://api.paystack.co https: http://localhost:* ws: wss:; frame-src 'self' https://accounts.google.com/ https://checkout.paystack.com; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self';",
   );
 
   return response;

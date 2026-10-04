@@ -124,3 +124,45 @@ a.btn-main:hover,
 ::-webkit-scrollbar-thumb:hover {
   background: #35089e;
 }
+
+/* Experience DAIH • Book a Space Button Responsive Polish */
+.btn-experience-daih {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  white-space: nowrap !important;
+  padding: 14px 30px !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  border-radius: 999px !important;
+  box-shadow: 0 8px 24px rgba(var(--primary-rgb), 0.22) !important;
+  text-decoration: none !important;
+  line-height: 1.3 !important;
+  transition: all 0.25s ease !important;
+  max-width: 100% !important;
+}
+
+.btn-experience-daih:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 12px 28px rgba(var(--primary-rgb), 0.32) !important;
+}
+
+@media (max-width: 575.98px) {
+  .btn-experience-daih {
+    font-size: 13.5px !important;
+    padding: 11px 20px !important;
+  }
+}
+
+@media (max-width: 375px) {
+  .btn-experience-daih {
+    font-size: 12.5px !important;
+    padding: 10px 16px !important;
+  }
+}
+
+@media (max-width: 340px) {
+  .btn-experience-daih .btn-prefix {
+    display: none !important;
+  }
+}

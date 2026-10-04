@@ -1,7 +1,10 @@
 import { Request, Response, NextFunction } from "express";
+import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
-import { config } from "../../config/env.js";
+import { getSafeRedirectUrl } from "@daih/types";
+import { config, isAllowedOrigin } from "../../config/env.js";
 import { identityService } from "./identity.service.js";
+import { oauthExchangeService } from "./oauth-exchange.service.js";
 import { staffUserService } from "./staff-user.service.js";
 import { customerService } from "./customer.service.js";
 import { AuthRequest } from "../../middleware/auth.middleware.js";
@@ -184,11 +187,14 @@ export class IdentityController {
       const ref = (req.query.ref || req.query.referralCode) as
         string | undefined;
       const destination = req.query.destination as string | undefined;
+      const codeChallenge = (req.query.code_challenge ||
+        req.query.codeChallenge) as string | undefined;
 
       const result = identityService.generateGoogleOAuthUrl({
         referralCode: ref,
         destination,
         portal,
+        codeChallenge,
       });
 
       const isSecure = Boolean(
@@ -268,19 +274,31 @@ export class IdentityController {
 
       res.clearCookie("daih_oauth_state", { path: "/" });
 
-      if (result.rawRefreshToken) {
-        this.setRefreshCookie(res, result.rawRefreshToken, req);
-      }
+      // Generate single-use authorization exchange code (burn-on-read, 60s TTL)
+      const exchangeCode =
+        "daih_auth_" + crypto.randomBytes(32).toString("hex");
+
+      await oauthExchangeService.storeExchangeCode(
+        exchangeCode,
+        {
+          accessToken: result.accessToken || "",
+          rawRefreshToken: result.rawRefreshToken,
+          user: result.user,
+          isNewUser: result.isNewUser,
+          needsConsent: result.needsConsent,
+          destination: getSafeRedirectUrl(result.destination, "/dashboard"),
+          codeChallenge: result.clientCodeChallenge || null,
+        },
+        60,
+      );
 
       const redirectPath = result.needsConsent ? "/consent" : "/auth/callback";
-
       const targetUrl = new URL(redirectPath, baseRedirectUrl);
-      if (result.accessToken) {
-        targetUrl.searchParams.set("token", result.accessToken);
-      }
-      if (result.destination) {
-        targetUrl.searchParams.set("destination", result.destination);
-      }
+      targetUrl.searchParams.set("code", exchangeCode);
+      targetUrl.searchParams.set(
+        "destination",
+        getSafeRedirectUrl(result.destination, "/dashboard"),
+      );
 
       res.redirect(targetUrl.toString());
     } catch (error: any) {
@@ -288,6 +306,37 @@ export class IdentityController {
       res.redirect(
         `${baseRedirectUrl}/login?error=${encodeURIComponent(errorMsg)}`,
       );
+    }
+  };
+
+  exchangeOAuthCode = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const { code, codeVerifier, code_verifier } = req.body;
+      const verifier = codeVerifier || code_verifier;
+
+      const data = await oauthExchangeService.exchangeCode(code, verifier);
+
+      if (data.rawRefreshToken) {
+        this.setRefreshCookie(res, data.rawRefreshToken, req);
+      }
+
+      res.json({
+        success: true,
+        data: {
+          token: data.accessToken,
+          accessToken: data.accessToken,
+          user: data.user,
+          isNewUser: data.isNewUser,
+          needsConsent: data.needsConsent,
+          destination: data.destination,
+        },
+      });
+    } catch (error) {
+      next(error);
     }
   };
 
@@ -326,6 +375,15 @@ export class IdentityController {
     next: NextFunction,
   ): Promise<void> => {
     try {
+      const origin = req.headers.origin as string | undefined;
+      if (origin && !isAllowedOrigin(origin)) {
+        res.status(403).json({
+          code: "FORBIDDEN",
+          message: "Origin not allowed to refresh credentials",
+        });
+        return;
+      }
+
       // Extract all candidate tokens if the browser sent multiple duplicate cookie paths
       const candidateTokens: string[] = [];
       const cookieHeader = req.headers.cookie || "";
@@ -1069,6 +1127,52 @@ export class IdentityController {
           },
         },
       });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  requestDeactivationOtp = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const result = await identityService.requestDeactivationOtp(req.user!.id);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  deactivateAccount = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const result = await identityService.deactivateAccount(
+        req.user!.id,
+        req.body,
+      );
+      this.clearRefreshCookie(res);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  reactivateAccount = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const result = await identityService.reactivateAccount(
+        req.user!.id,
+        req.body,
+      );
+      res.json(result);
     } catch (error) {
       next(error);
     }

@@ -326,9 +326,10 @@ export function VerifiedReviewsSection() {
 
         {/* Bottom CTA */}
         <div className="text-center mt-5 pt-3">
-          <Link href="/our-plans" className="btn-main">
-            <span>Experience DAIH &bull; Book a Space</span>
-            <i className="fa fa-arrow-right ms-2"></i>
+          <Link href="/our-plans" className="btn-main btn-experience-daih">
+            <span className="btn-prefix">Experience DAIH &bull;&nbsp;</span>
+            <span className="btn-action">Book a Space</span>
+            <i className="fa fa-arrow-right ms-2" aria-hidden="true"></i>
           </Link>
         </div>
       </div>

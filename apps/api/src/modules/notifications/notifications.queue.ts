@@ -19,6 +19,7 @@ export type NotificationJobType =
   | "customer.refund_processed"
   | "security.account_linked"
   | "auth.mfa_otp"
+  | "auth.deactivation_otp"
   | "campaign.broadcast";
 
 export interface NotificationJobData {

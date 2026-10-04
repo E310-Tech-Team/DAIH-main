@@ -347,6 +347,25 @@ export class DaihApiClient {
       return { ...res, accessToken: jwt, token: jwt };
     },
 
+    exchangeOAuthCode: async (payload: {
+      code: string;
+      codeVerifier?: string;
+    }): Promise<GoogleAuthResponseDTO & { destination?: string }> => {
+      const res = await this.request<any>("/identity/oauth/exchange", {
+        method: "POST",
+        body: JSON.stringify({
+          code: payload.code,
+          code_verifier: payload.codeVerifier,
+        }),
+      });
+      const jwt = res.accessToken || res.token || "";
+      if (jwt) {
+        this.setAccessToken(jwt);
+        apiCacheManager.invalidate();
+      }
+      return { ...res, accessToken: jwt, token: jwt };
+    },
+
     submitOnboardingAttribution: (data: {
       source?: string;
       referralCode?: string;
@@ -532,6 +551,36 @@ export class DaihApiClient {
         "/identity/me/avatar",
         {
           method: "DELETE",
+        },
+      ),
+
+    requestDeactivationOtp: () =>
+      this.request<{ success: boolean; message: string }>(
+        "/identity/account/request-deactivation-otp",
+        {
+          method: "POST",
+        },
+      ),
+
+    deactivateAccount: (data: {
+      password?: string;
+      otp?: string;
+      reason?: string;
+    }) =>
+      this.request<{ success: boolean; message: string }>(
+        "/identity/account/deactivate",
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      ),
+
+    reactivateAccount: (data: { userId: string; reason?: string }) =>
+      this.request<{ success: boolean; message: string; user: any }>(
+        "/identity/account/reactivate",
+        {
+          method: "POST",
+          body: JSON.stringify(data),
         },
       ),
 

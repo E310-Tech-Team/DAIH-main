@@ -70,10 +70,10 @@ export default function HomePage() {
                 <div className="container text-white text-center">
                   <div className="row">
                     <div className="col-md-6 offset-md-3">
-                      <h1 className="mb-3 wow fadeInUp">
+                      <h1 className="mb-3 animate-carousel-title">
                         Work. Meet. Create. Grow.
                       </h1>
-                      <p className="lead wow fadeInUp" data-wow-delay=".3s">
+                      <p className="lead animate-carousel-lead">
                         Welcome to Dare Adeboye Innovation Hub (DAIH) — flexible
                         workspaces designed for focus, collaboration, and
                         productivity in Redemption City, Ogun State.
@@ -81,8 +81,7 @@ export default function HomePage() {
                       <div className="spacer-10"></div>
                       <Link
                         href="/our-plans"
-                        className="btn-main wow fadeInUp"
-                        data-wow-delay=".6s"
+                        className="btn-main animate-carousel-btn"
                       >
                         View Our Plans
                       </Link>
@@ -107,10 +106,10 @@ export default function HomePage() {
                 <div className="container text-white text-center">
                   <div className="row">
                     <div className="col-md-6 offset-md-3">
-                      <h1 className="mb-3 wow fadeInUp">
+                      <h1 className="mb-3 animate-carousel-title">
                         Modern &amp; comfortable spaces to work
                       </h1>
-                      <p className="lead wow fadeInUp" data-wow-delay=".3s">
+                      <p className="lead animate-carousel-lead">
                         Enjoy ergonomic furniture, serene common areas, and
                         reliable facilities that keep you comfortable and
                         productive throughout the day.
@@ -118,8 +117,7 @@ export default function HomePage() {
                       <div className="spacer-10"></div>
                       <Link
                         href="/our-plans"
-                        className="btn-main wow fadeInUp"
-                        data-wow-delay=".6s"
+                        className="btn-main animate-carousel-btn"
                       >
                         View Our Plans
                       </Link>
@@ -144,10 +142,10 @@ export default function HomePage() {
                 <div className="container text-white text-center">
                   <div className="row">
                     <div className="col-md-6 offset-md-3">
-                      <h1 className="mb-3 wow fadeInUp">
+                      <h1 className="mb-3 animate-carousel-title">
                         A workspace for every need
                       </h1>
-                      <p className="lead wow fadeInUp" data-wow-delay=".3s">
+                      <p className="lead animate-carousel-lead">
                         From flex desks and dedicated desks to private offices,
                         training rooms, rooftop lounges, and creative studios —
                         choose what fits your work style.
@@ -155,8 +153,7 @@ export default function HomePage() {
                       <div className="spacer-10"></div>
                       <Link
                         href="/our-plans"
-                        className="btn-main wow fadeInUp"
-                        data-wow-delay=".6s"
+                        className="btn-main animate-carousel-btn"
                       >
                         View Our Plans
                       </Link>

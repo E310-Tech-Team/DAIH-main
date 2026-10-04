@@ -176,3 +176,20 @@ export const refreshRateLimiter = rateLimit({
   handler: standardHandler,
   skip: skipInTest,
 });
+
+/**
+ * Rate Limiter for OAuth Code Exchange Endpoint (10 per minute per IP)
+ */
+export const oauthExchangeRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  passOnStoreError: true,
+  store: createRedisStore("oauth-exchange"),
+  keyGenerator: (req: Request) => {
+    return getVerifiedClientIp(req) || "unknown";
+  },
+  handler: standardHandler,
+  skip: skipInTest,
+});

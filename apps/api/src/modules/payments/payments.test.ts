@@ -11,7 +11,9 @@ import {
   PaymentStatus,
   ResourceCategory,
 } from "@daih/types";
+import { RefundReasonCode } from "@prisma/client";
 import { paymentsService } from "./payments.service.js";
+import { webhookProcessorWorker } from "../../jobs/webhook-processor.worker.js";
 
 describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
   let customerToken: string;
@@ -43,6 +45,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
   beforeAll(async () => {
     // 0. Pre-clean test data from prior interrupted runs
     try {
+      await prisma.webhookEvent.deleteMany({});
       await prisma.invoice.deleteMany({
         where: { customerEmail: { contains: "payment@daih.ng" } },
       });
@@ -209,6 +212,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
         state: BookingState.HELD,
         holdExpiresAt,
         totalAmount: 15000,
+        cashDue: 15000,
         currency: "NGN",
       },
     });
@@ -219,6 +223,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
   afterAll(async () => {
     // Cleanup test data
     try {
+      await prisma.webhookEvent.deleteMany({});
       await prisma.invoice.deleteMany({
         where: { customerEmail: { contains: "payment@daih.ng" } },
       });
@@ -301,6 +306,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
     });
 
     it("should handle valid charge.success webhook, confirm booking, and generate invoice", async () => {
+      await prisma.webhookEvent.deleteMany({});
       const payload = {
         event: "charge.success",
         data: {
@@ -350,6 +356,9 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
 
       expect(res.body.received).toBe(true);
 
+      // Process queued webhook asynchronously via worker
+      await webhookProcessorWorker.processPendingEvents();
+
       // Verify Transaction updated to SUCCESSFUL
       const tx = await prisma.transaction.findUnique({
         where: { reference: testTransactionReference },
@@ -366,7 +375,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
       });
       expect(booking?.state).toBe(BookingState.CONFIRMED);
       expect(booking?.qrToken).toBeDefined();
-      expect(booking?.qrToken?.startsWith("daih_qr_")).toBe(true);
+      expect(booking?.qrToken?.startsWith("daih_pass_v1.")).toBe(true);
       expect(booking?.holdExpiresAt).toBeNull();
 
       // Verify Invoice generated
@@ -411,6 +420,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
     });
 
     it("should handle charge.failed webhook gracefully", async () => {
+      await prisma.webhookEvent.deleteMany({});
       // Create a temporary booking and transaction for failed payment test
       const failedBooking = await prisma.booking.create({
         data: {
@@ -421,6 +431,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
           endTime: new Date(Date.now() + 52 * 60 * 60 * 1000),
           state: BookingState.PENDING_PAYMENT,
           totalAmount: 8000,
+          cashDue: 8000,
           currency: "NGN",
         },
       });
@@ -460,6 +471,9 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
         .expect(200);
 
       expect(res.body.received).toBe(true);
+
+      // Process queued webhook asynchronously via worker
+      await webhookProcessorWorker.processPendingEvents();
 
       const updatedTx = await prisma.transaction.findUnique({
         where: { reference: failedTxRef },
@@ -529,13 +543,13 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
         .expect(404);
     });
 
-    it("should return 404 as refund processing routes are removed from the system", async () => {
-      const tx = await prisma.transaction.findUnique({
-        where: { reference: testTransactionReference },
+    it("should return 404 as legacy direct refund processing routes are removed from the system", async () => {
+      const tx = await prisma.transaction.findFirst({
+        where: { paystackReference: testTransactionReference },
       });
 
       await request(app)
-        .post(`/api/v1/payments/${tx?.id}/refund`)
+        .post(`/api/v1/payments/${tx?.id || "mock-tx-id"}/refund`)
         .set("Authorization", `Bearer ${financeToken}`)
         .send({
           amount: 15000,
@@ -544,7 +558,8 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
         .expect(404);
     });
 
-    it("should handle late webhook arrival on expired slot when slot is re-booked: marks transaction SUCCESSFUL, booking NO_SHOW, and flags CAPACITY_CONFLICT for admin", async () => {
+    it("should handle late webhook arrival on expired slot when slot is re-booked: marks transaction REQUIRES_RECONCILIATION and initiates UNAVAILABLE_RESOURCE system refund", async () => {
+      await prisma.webhookEvent.deleteMany({});
       // Set resource capacity to 1 for this test
       await prisma.facilityResource.update({
         where: { id: testResourceId },
@@ -561,6 +576,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
           endTime: new Date(Date.now() + 76 * 60 * 60 * 1000),
           state: BookingState.EXPIRED,
           totalAmount: 15000,
+          cashDue: 15000,
           currency: "NGN",
         },
       });
@@ -587,6 +603,7 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
           endTime: new Date(Date.now() + 76 * 60 * 60 * 1000),
           state: BookingState.CONFIRMED,
           totalAmount: 15000,
+          cashDue: 15000,
           currency: "NGN",
         },
       });
@@ -620,17 +637,23 @@ describe("Milestone 1.4: Payment Engine & Reconciliation Module", () => {
 
       expect(res.body.received).toBe(true);
 
-      // User A's transaction is SUCCESSFUL (retained revenue)
-      const updatedTx = await prisma.transaction.findUnique({
-        where: { reference: userATxRef },
-      });
-      expect(updatedTx?.status).toBe(PaymentStatus.SUCCESSFUL);
+      // Process queued webhook asynchronously via worker
+      await webhookProcessorWorker.processPendingEvents();
 
-      // User A's booking is transitioned to NO_SHOW for admin discretionary rescheduling
-      const updatedBookingA = await prisma.booking.findUnique({
-        where: { id: userABooking.id },
+      // User A's transaction is marked REQUIRES_RECONCILIATION because capacity is claimed
+      const updatedTx = await prisma.transaction.findFirst({
+        where: { paystackReference: userATxRef },
       });
-      expect(updatedBookingA?.state).toBe(BookingState.NO_SHOW);
+      expect(updatedTx?.status).toBe(PaymentStatus.REQUIRES_RECONCILIATION);
+
+      // System refund request is automatically spawned for UNAVAILABLE_RESOURCE
+      const spawnedRefund = await prisma.refundRequest.findFirst({
+        where: { transactionId: updatedTx?.id },
+      });
+      expect(spawnedRefund).toBeDefined();
+      expect(spawnedRefund?.reasonCode).toBe(
+        RefundReasonCode.UNAVAILABLE_RESOURCE,
+      );
 
       // User B's booking remains intact and CONFIRMED
       const updatedBookingB = await prisma.booking.findUnique({

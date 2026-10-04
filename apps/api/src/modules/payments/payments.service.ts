@@ -18,6 +18,14 @@ import {
 } from "../booking/booking.state-machine.js";
 import { discountService } from "../discounts/discount.service.js";
 import { loyaltyService } from "../loyalty/loyalty.service.js";
+import { generateSignedQrToken } from "../access/qr-token.util.js";
+import { Decimal } from "@prisma/client/runtime/library";
+import {
+  HoldStatus,
+  CoinLedgerAction,
+  RefundReasonCode,
+  RefundStatus,
+} from "@prisma/client";
 import {
   BookingState,
   PaymentStatus,
@@ -135,125 +143,154 @@ export class PaymentsService {
   }
 
   /**
-   * Initiates payment for an active booking hold
+   * Initiates payment for an active booking hold with in-flight race protection and cashDue price locking
    */
   async initializePayment(
     bookingId: string,
     userId: string,
     callbackUrl?: string,
   ) {
-    const booking = await bookingRepository.findById(bookingId);
-    if (!booking) {
-      const err: any = new Error(`Booking '${bookingId}' not found`);
-      err.statusCode = 404;
-      err.code = "BOOKING_NOT_FOUND";
-      throw err;
-    }
+    const initResult = await prisma.$transaction(
+      async (tx) => {
+        // Serialized booking lock
+        const [booking] = await tx.$queryRaw<
+          Array<{
+            id: string;
+            reference: string;
+            userId: string;
+            state: BookingState;
+            holdExpiresAt: Date | null;
+            cashDue: Prisma.Decimal;
+            totalAmount: Prisma.Decimal;
+            currency: string;
+          }>
+        >`SELECT id, reference, "userId", state, "holdExpiresAt", "cashDue", "totalAmount", currency FROM "bookings" WHERE id = ${bookingId} FOR UPDATE`;
 
-    if (booking.userId !== userId) {
-      const err: any = new Error(
-        "You are not authorized to pay for this booking",
-      );
-      err.statusCode = 403;
-      err.code = "FORBIDDEN";
-      throw err;
-    }
+        if (!booking) {
+          const err: any = new Error(`Booking '${bookingId}' not found`);
+          err.statusCode = 404;
+          err.code = "BOOKING_NOT_FOUND";
+          throw err;
+        }
 
-    if (
-      booking.state !== BookingState.HELD &&
-      booking.state !== BookingState.PENDING_PAYMENT
-    ) {
-      const err: any = new Error(
-        `Cannot pay for booking in state '${booking.state}'`,
-      );
-      err.statusCode = 400;
-      err.code = "INVALID_BOOKING_STATE";
-      throw err;
-    }
-
-    // 1. Safeguard: Check if this booking has already been paid and confirmed
-    const successfulTx = await prisma.transaction.findFirst({
-      where: {
-        bookingId: booking.id,
-        status: PaymentStatus.SUCCESSFUL,
-      },
-    });
-    if (successfulTx) {
-      const err: any = new Error(
-        `This booking has already been paid and confirmed (Reference: ${successfulTx.reference}).`,
-      );
-      err.statusCode = 400;
-      err.code = "BOOKING_ALREADY_PAID";
-      throw err;
-    }
-
-    // 2. Safeguard: Check if an active PENDING transaction exists and verify with Paystack first
-    const recentPendingTx = await prisma.transaction.findFirst({
-      where: {
-        bookingId: booking.id,
-        status: PaymentStatus.PENDING,
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    if (recentPendingTx && recentPendingTx.paystackReference) {
-      try {
-        const verifyRes = await this.paystack.verifyTransaction(
-          recentPendingTx.paystackReference,
-        );
-        if (
-          verifyRes &&
-          verifyRes.data &&
-          verifyRes.data.status === "success"
-        ) {
-          // Immediately confirm booking to prevent double charge
-          await this.handleWebhookEvent({
-            event: "charge.success",
-            data: verifyRes.data as any,
-          });
+        if (booking.userId !== userId) {
           const err: any = new Error(
-            `Payment already received and confirmed on Paystack (Reference: ${recentPendingTx.reference}).`,
+            "You are not authorized to pay for this booking",
+          );
+          err.statusCode = 403;
+          err.code = "FORBIDDEN";
+          throw err;
+        }
+
+        if (
+          booking.state !== BookingState.HELD &&
+          booking.state !== BookingState.PENDING_PAYMENT
+        ) {
+          const err: any = new Error(
+            `Cannot pay for booking in state '${booking.state}'`,
+          );
+          err.statusCode = 400;
+          err.code = "INVALID_BOOKING_STATE";
+          throw err;
+        }
+
+        const cashDueDecimal = new Prisma.Decimal(booking.cashDue);
+        if (cashDueDecimal.isZero() || cashDueDecimal.isNegative()) {
+          const err: any = new Error(
+            "Booking is fully covered by coins or discounts and does not require cash payment.",
+          );
+          err.statusCode = 400;
+          err.code = "ZERO_CASH_DUE";
+          throw err;
+        }
+
+        // Check if booking has already been paid and confirmed
+        const successfulTx = await tx.transaction.findFirst({
+          where: {
+            bookingId: booking.id,
+            status: PaymentStatus.SUCCESSFUL,
+          },
+        });
+        if (successfulTx) {
+          const err: any = new Error(
+            `This booking has already been paid and confirmed (Reference: ${successfulTx.reference}).`,
           );
           err.statusCode = 400;
           err.code = "BOOKING_ALREADY_PAID";
           throw err;
         }
-      } catch (e: any) {
-        if (e.code === "BOOKING_ALREADY_PAID") throw e;
-        console.warn(
-          "Notice checking existing transaction before initialize:",
-          e.message,
-        );
-      }
-    }
 
-    const now = new Date();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const randomSuffix = Math.floor(10000 + Math.random() * 90000);
-    const reference = `DAIH-PAY-${datePart}-${randomSuffix}`;
-    const amount = Number(booking.totalAmount);
-    const amountInKobo = Math.round(amount * 100);
+        // Check existing PENDING transaction for in-flight or re-usable checkout session
+        const existingPendingTx = await tx.transaction.findFirst({
+          where: {
+            bookingId: booking.id,
+            status: PaymentStatus.PENDING,
+          },
+          orderBy: { createdAt: "desc" },
+        });
 
-    // Run interactive transaction for state change and transaction creation
-    const { transaction, newHoldExpiresAt } = await prisma.$transaction(
-      async (tx) => {
+        if (existingPendingTx) {
+          const ageMs =
+            Date.now() - new Date(existingPendingTx.createdAt).getTime();
+          const authUrl = (existingPendingTx.gatewayResponse as any)
+            ?.authorization_url;
+
+          // In-flight check (< 30s) where authorization URL is not yet populated
+          if (!authUrl && ageMs < 30 * 1000) {
+            return { inFlight: true, transactionId: existingPendingTx.id };
+          }
+
+          // Valid existing session (< 15 mins) with matching cashDue
+          const isUnder15Mins = ageMs < 15 * 60 * 1000;
+          if (
+            authUrl &&
+            isUnder15Mins &&
+            new Prisma.Decimal(existingPendingTx.amount).equals(cashDueDecimal)
+          ) {
+            return {
+              existing: true,
+              authorization_url: authUrl,
+              access_code: (existingPendingTx.gatewayResponse as any)
+                ?.access_code,
+              reference: existingPendingTx.reference,
+              transactionId: existingPendingTx.id,
+              amount: Number(existingPendingTx.amount),
+              currency: existingPendingTx.currency,
+            };
+          }
+
+          // Otherwise mark stale pending transaction as ABANDONED
+          await tx.transaction.update({
+            where: { id: existingPendingTx.id },
+            data: { status: PaymentStatus.ABANDONED },
+          });
+        }
+
         // Extend hold by 15 minutes for payment session
-        const holdExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
+        const newHoldExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await tx.booking.update({
           where: { id: booking.id },
           data: {
             state: BookingState.PENDING_PAYMENT,
-            holdExpiresAt,
+            holdExpiresAt: newHoldExpiresAt,
           },
         });
 
+        const datePart = new Date()
+          .toISOString()
+          .slice(0, 10)
+          .replace(/-/g, "");
+        const randomSuffix = Math.floor(10000 + Math.random() * 90000);
+        const reference = `DAIH-PAY-${datePart}-${randomSuffix}`;
+        const amount = Number(cashDueDecimal);
+
+        // Explicitly create and commit Transaction row with amount = booking.cashDue
         const createdTx = await tx.transaction.create({
           data: {
             reference,
             bookingId: booking.id,
             userId,
-            amount,
+            amount: cashDueDecimal,
             currency: booking.currency || "NGN",
             status: PaymentStatus.PENDING,
             method: PaymentMethod.PAYSTACK,
@@ -278,35 +315,956 @@ export class PaymentsService {
           tx,
         );
 
-        return { transaction: createdTx, newHoldExpiresAt: holdExpiresAt };
+        return {
+          created: true,
+          transaction: createdTx,
+          booking,
+          amount,
+          reference,
+        };
       },
+      { timeout: 20000, maxWait: 15000 },
     );
 
-    // Reschedule hold expiry job with new 15-minute window
+    if ("existing" in initResult && initResult.existing) {
+      return initResult;
+    }
+
+    if ("inFlight" in initResult && initResult.inFlight) {
+      // Poll briefly (3 attempts, 200ms intervals) for authorizationUrl
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        const checkTx = await prisma.transaction.findUnique({
+          where: { id: (initResult as any).transactionId },
+        });
+        const authUrl = (checkTx?.gatewayResponse as any)?.authorization_url;
+        if (authUrl) {
+          return {
+            authorization_url: authUrl,
+            access_code: (checkTx?.gatewayResponse as any)?.access_code,
+            reference: checkTx!.reference,
+            transactionId: checkTx!.id,
+            amount: Number(checkTx!.amount),
+            currency: checkTx!.currency,
+          };
+        }
+      }
+      const err: any = new Error(
+        "Payment initialization is currently processing. Please retry in a few moments.",
+      );
+      err.statusCode = 409;
+      err.code = "RETRY_LATER";
+      throw err;
+    }
+
+    const { transaction, booking, amount, reference } = initResult as any;
+
+    // Reschedule hold expiry job
     await scheduleHoldExpiry(booking.id, 15 * 60 * 1000);
 
-    // Call Paystack gateway
-    const paystackRes = await this.paystack.initializeTransaction({
-      email: booking.user.email,
-      amount: amountInKobo,
-      reference,
-      callbackUrl,
-      metadata: {
-        bookingId: booking.id,
-        bookingReference: booking.reference,
-        userId,
-        transactionId: transaction.id,
-      },
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
     });
 
-    return {
-      authorization_url: paystackRes.authorization_url,
-      access_code: paystackRes.access_code,
-      reference: paystackRes.reference,
-      transactionId: transaction.id,
-      amount,
-      currency: booking.currency,
-    };
+    const amountInKobo = Math.round(amount * 100);
+
+    // Call Paystack gateway decoupled outside DB transaction
+    try {
+      const paystackRes = await this.paystack.initializeTransaction({
+        email: user?.email || "customer@daih.ng",
+        amount: amountInKobo,
+        reference,
+        callbackUrl,
+        metadata: {
+          bookingId: booking.id,
+          bookingReference: booking.reference,
+          userId,
+          transactionId: transaction.id,
+        },
+      });
+
+      await prisma.transaction.update({
+        where: { id: transaction.id },
+        data: {
+          paystackReference: paystackRes.reference,
+          gatewayResponse: {
+            authorization_url: paystackRes.authorization_url,
+            access_code: paystackRes.access_code,
+          },
+        },
+      });
+
+      return {
+        authorization_url: paystackRes.authorization_url,
+        access_code: paystackRes.access_code,
+        reference: paystackRes.reference,
+        transactionId: transaction.id,
+        amount,
+        currency: booking.currency,
+      };
+    } catch (gatewayErr: any) {
+      await prisma.transaction.update({
+        where: { id: transaction.id },
+        data: {
+          status: PaymentStatus.FAILED,
+          failedAt: new Date(),
+          gatewayResponse: { error: gatewayErr?.message || "Gateway error" },
+        },
+      });
+      const err: any = new Error(
+        `Payment Gateway Error: ${gatewayErr?.message}`,
+      );
+      err.statusCode = 502;
+      err.code = "PAYMENT_GATEWAY_ERROR";
+      throw err;
+    }
+  }
+
+  /**
+   * Authoritative Payment Reconciler with Strict State Machine Precedence
+   */
+  async reconcilePaymentTransaction(
+    transactionId: string,
+    gatewayPayload?: any,
+    eventId?: string,
+  ): Promise<{
+    status: PaymentStatus;
+    confirmed: boolean;
+    reference: string;
+    message: string;
+  }> {
+    return prisma.$transaction(
+      async (tx) => {
+        // 1. Transaction Lock (Hierarchical Lock Order: Step 1 = Transaction)
+        const [txRecord] = await tx.$queryRaw<
+          Array<{
+            id: string;
+            reference: string;
+            bookingId: string;
+            userId: string;
+            amount: Prisma.Decimal;
+            currency: string;
+            status: PaymentStatus;
+            paystackReference: string | null;
+          }>
+        >`SELECT id, reference, "bookingId", "userId", amount, currency, status, "paystackReference" FROM "transactions" WHERE id = ${transactionId} FOR UPDATE`;
+
+        if (!txRecord) {
+          const err: any = new Error(
+            `Transaction '${transactionId}' not found`,
+          );
+          err.statusCode = 404;
+          err.code = "TRANSACTION_NOT_FOUND";
+          throw err;
+        }
+
+        // Terminal status idempotent no-op
+        const terminalStatuses: PaymentStatus[] = [
+          PaymentStatus.SUCCESSFUL,
+          PaymentStatus.REFUNDED,
+          PaymentStatus.PARTIALLY_REFUNDED,
+          PaymentStatus.FLAGGED_MISMATCH,
+          PaymentStatus.REQUIRES_RECONCILIATION,
+          PaymentStatus.FAILED,
+        ];
+        if (terminalStatuses.includes(txRecord.status)) {
+          return {
+            status: txRecord.status,
+            confirmed: txRecord.status === PaymentStatus.SUCCESSFUL,
+            reference: txRecord.reference,
+            message: `Transaction already in terminal state: ${txRecord.status}`,
+          };
+        }
+
+        // Validate gateway payload if supplied
+        if (gatewayPayload) {
+          const isSuccess =
+            gatewayPayload.status === "success" ||
+            gatewayPayload.event === "charge.success";
+          if (!isSuccess) {
+            await tx.transaction.update({
+              where: { id: txRecord.id },
+              data: {
+                status: PaymentStatus.FAILED,
+                failedAt: new Date(),
+                gatewayResponse: gatewayPayload,
+              },
+            });
+            await tx.auditLog.create({
+              data: {
+                userId: txRecord.userId,
+                action: "PAYMENT_FAILED",
+                entityType: "Transaction",
+                entityId: txRecord.id,
+                metadata: {
+                  reference: txRecord.reference,
+                  gatewayStatus: gatewayPayload.status,
+                },
+              },
+            });
+            await outboxService.recordEvent(
+              {
+                eventType: "payment.failed",
+                aggregateType: "Transaction",
+                aggregateId: txRecord.id,
+                payload: {
+                  transactionId: txRecord.id,
+                  bookingId: txRecord.bookingId,
+                  reference: txRecord.reference,
+                },
+              },
+              tx,
+            );
+            return {
+              status: PaymentStatus.FAILED,
+              confirmed: false,
+              reference: txRecord.reference,
+              message: "Payment failed on gateway",
+            };
+          }
+        }
+
+        // 2. Fetch Booking Under Lock (Hierarchical Lock Order: Step 2 = Booking)
+        const [booking] = await tx.$queryRaw<
+          Array<{
+            id: string;
+            reference: string;
+            resourceId: string;
+            userId: string;
+            totalAmount: Prisma.Decimal;
+            coinsRedeemed: Prisma.Decimal;
+            coinTenderAmount: Prisma.Decimal;
+            cashDue: Prisma.Decimal;
+            state: BookingState;
+            holdExpiresAt: Date | null;
+            startTime: Date;
+            endTime: Date;
+            currency: string;
+            quantity: number;
+          }>
+        >`SELECT id, reference, "resourceId", "userId", "totalAmount", "coinsRedeemed", "coinTenderAmount", "cashDue", state, "holdExpiresAt", "startTime", "endTime", currency, quantity FROM "bookings" WHERE id = ${txRecord.bookingId} FOR UPDATE`;
+
+        if (!booking) {
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: { status: PaymentStatus.REQUIRES_RECONCILIATION },
+          });
+          return {
+            status: PaymentStatus.REQUIRES_RECONCILIATION,
+            confirmed: false,
+            reference: txRecord.reference,
+            message: "Booking record missing",
+          };
+        }
+
+        // Helper to spawn system refund safely
+        const spawnSystemRefund = async (
+          reasonCode: RefundReasonCode,
+          reasonText: string,
+        ) => {
+          try {
+            await tx.refundRequest.create({
+              data: {
+                bookingId: booking.id,
+                transactionId: txRecord.id,
+                amount: txRecord.amount,
+                reasonCode,
+                reason: reasonText,
+                status: RefundStatus.PENDING,
+                isSystemInitiated: true,
+                requestedByUserId: null,
+              },
+            });
+          } catch (e: any) {
+            if (e.code !== "P2002") throw e;
+          }
+        };
+
+        // STEP 1: Booking State Machine Evaluation (Executed BEFORE Price Guard)
+        // Case A: Explicitly Cancelled or Refunded
+        if (
+          booking.state === BookingState.CANCELLED ||
+          booking.state === BookingState.REFUNDED
+        ) {
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: { status: PaymentStatus.REQUIRES_RECONCILIATION },
+          });
+          await spawnSystemRefund(
+            RefundReasonCode.UNAVAILABLE_RESOURCE,
+            `Booking was in terminal state '${booking.state}' when payment arrived`,
+          );
+          await tx.auditLog.create({
+            data: {
+              userId: booking.userId,
+              action: "PAYMENT_REQUIRES_RECONCILIATION",
+              entityType: "Transaction",
+              entityId: txRecord.id,
+              metadata: {
+                bookingId: booking.id,
+                reason: `Booking state '${booking.state}' cannot be revived. System refund initiated.`,
+              },
+            },
+          });
+          await outboxService.recordEvent(
+            {
+              eventType: "admin.payment_flagged",
+              aggregateType: "Transaction",
+              aggregateId: txRecord.id,
+              payload: {
+                transactionId: txRecord.id,
+                bookingId: booking.id,
+                reasonCode: "UNAVAILABLE_RESOURCE",
+                bookingState: booking.state,
+              },
+            },
+            tx,
+          );
+          return {
+            status: PaymentStatus.REQUIRES_RECONCILIATION,
+            confirmed: false,
+            reference: txRecord.reference,
+            message: "Booking was cancelled/refunded; system refund initiated",
+          };
+        }
+
+        // Case B: Already Confirmed
+        if (
+          booking.state === BookingState.CONFIRMED ||
+          booking.state === BookingState.CHECKED_IN ||
+          booking.state === BookingState.COMPLETED
+        ) {
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: { status: PaymentStatus.REQUIRES_RECONCILIATION },
+          });
+          await spawnSystemRefund(
+            RefundReasonCode.DUPLICATE_PAYMENT,
+            "Payment received for already-confirmed booking",
+          );
+          await tx.auditLog.create({
+            data: {
+              userId: booking.userId,
+              action: "PAYMENT_DUPLICATE_FLAGGED",
+              entityType: "Transaction",
+              entityId: txRecord.id,
+              metadata: {
+                bookingId: booking.id,
+                reason:
+                  "Duplicate payment for confirmed booking. System refund initiated.",
+              },
+            },
+          });
+          await outboxService.recordEvent(
+            {
+              eventType: "admin.payment_flagged",
+              aggregateType: "Transaction",
+              aggregateId: txRecord.id,
+              payload: {
+                transactionId: txRecord.id,
+                bookingId: booking.id,
+                reasonCode: "DUPLICATE_PAYMENT",
+              },
+            },
+            tx,
+          );
+          return {
+            status: PaymentStatus.REQUIRES_RECONCILIATION,
+            confirmed: false,
+            reference: txRecord.reference,
+            message:
+              "Booking already confirmed; duplicate payment refund initiated",
+          };
+        }
+
+        // STEP 2: Slot Time Validity Guard
+        const now = new Date();
+        if (new Date(booking.endTime).getTime() <= now.getTime()) {
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: { status: PaymentStatus.REQUIRES_RECONCILIATION },
+          });
+          await spawnSystemRefund(
+            RefundReasonCode.UNAVAILABLE_RESOURCE,
+            "Booking end time has already elapsed in real world",
+          );
+          await tx.auditLog.create({
+            data: {
+              userId: booking.userId,
+              action: "PAYMENT_SLOT_ELAPSED",
+              entityType: "Transaction",
+              entityId: txRecord.id,
+              metadata: {
+                bookingId: booking.id,
+                endTime: booking.endTime,
+                reason: "Booking slot already ended. System refund initiated.",
+              },
+            },
+          });
+          await outboxService.recordEvent(
+            {
+              eventType: "admin.payment_flagged",
+              aggregateType: "Transaction",
+              aggregateId: txRecord.id,
+              payload: {
+                transactionId: txRecord.id,
+                bookingId: booking.id,
+                reasonCode: "UNAVAILABLE_RESOURCE",
+                reason: "SLOT_ELAPSED",
+              },
+            },
+            tx,
+          );
+          return {
+            status: PaymentStatus.REQUIRES_RECONCILIATION,
+            confirmed: false,
+            reference: txRecord.reference,
+            message: "Booking slot time has passed; system refund initiated",
+          };
+        }
+
+        // STEP 3: Price Guard Against booking.cashDue (Evaluated on pending bookings)
+        const bookingCashDue = new Prisma.Decimal(booking.cashDue);
+        const txAmount = new Prisma.Decimal(txRecord.amount);
+        if (!txAmount.equals(bookingCashDue)) {
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: { status: PaymentStatus.FLAGGED_MISMATCH },
+          });
+          await spawnSystemRefund(
+            RefundReasonCode.PRICE_CHANGED,
+            `Price mismatch: Transaction amount ${txAmount} does not equal cashDue ${bookingCashDue}`,
+          );
+          await tx.auditLog.create({
+            data: {
+              userId: booking.userId,
+              action: "PAYMENT_PRICE_MISMATCH",
+              entityType: "Transaction",
+              entityId: txRecord.id,
+              metadata: {
+                bookingId: booking.id,
+                txAmount: txAmount.toNumber(),
+                bookingCashDue: bookingCashDue.toNumber(),
+              },
+            },
+          });
+          await outboxService.recordEvent(
+            {
+              eventType: "admin.payment_flagged",
+              aggregateType: "Transaction",
+              aggregateId: txRecord.id,
+              payload: {
+                transactionId: txRecord.id,
+                bookingId: booking.id,
+                reasonCode: "PRICE_CHANGED",
+                txAmount: txAmount.toNumber(),
+                cashDue: bookingCashDue.toNumber(),
+              },
+            },
+            tx,
+          );
+          return {
+            status: PaymentStatus.FLAGGED_MISMATCH,
+            confirmed: false,
+            reference: txRecord.reference,
+            message: "Price mismatch detected; refund initiated",
+          };
+        }
+
+        // STEP 4: Process Live vs. Expired Booking Confirmation
+        const isHoldLive =
+          [BookingState.HELD, BookingState.PENDING_PAYMENT].includes(
+            booking.state as any,
+          ) &&
+          booking.holdExpiresAt !== null &&
+          new Date(booking.holdExpiresAt).getTime() >= now.getTime();
+
+        const user = await tx.user.findUnique({
+          where: { id: booking.userId },
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            clientId: true,
+          },
+        });
+        const resource = await tx.facilityResource.findUnique({
+          where: { id: booking.resourceId },
+          select: { id: true, name: true, capacity: true },
+        });
+
+        const customerName =
+          `${user?.firstName || ""} ${user?.lastName || ""}`.trim() ||
+          "Valued Customer";
+
+        if (isHoldLive) {
+          // CASE C: Live Active Hold
+          // Capacity and coins were already reserved.
+          if (new Prisma.Decimal(booking.coinsRedeemed).gt(0)) {
+            // Lock coin_holds -> coin_balances
+            await tx.$queryRaw`
+              SELECT id FROM "coin_holds" WHERE "bookingId" = ${booking.id} FOR UPDATE
+            `;
+            const [balanceRow] = await tx.$queryRaw<
+              Array<{ balance: Prisma.Decimal }>
+            >`
+              SELECT balance FROM "coin_balances" WHERE "userId" = ${booking.userId} FOR UPDATE
+            `;
+
+            // Transition coin_holds row to BURNED
+            await tx.coinHold.updateMany({
+              where: { bookingId: booking.id },
+              data: { status: HoldStatus.BURNED },
+            });
+
+            // Record CoinLedgerEntry
+            const burnAmount = new Prisma.Decimal(booking.coinsRedeemed);
+            const currentBal = new Prisma.Decimal(balanceRow?.balance || 0);
+            const newBal = currentBal.sub(burnAmount);
+
+            try {
+              await tx.coinLedgerEntry.create({
+                data: {
+                  userId: booking.userId,
+                  action: CoinLedgerAction.HOLD_BURNED,
+                  amount: burnAmount.negated(),
+                  balanceAfter: newBal,
+                  referenceType: "Booking",
+                  referenceId: booking.id,
+                  idempotencyKey: `burn_booking_${booking.id}`,
+                  metadata: {
+                    bookingId: booking.id,
+                    transactionId: txRecord.id,
+                  },
+                },
+              });
+              await tx.coinBalance.update({
+                where: { userId: booking.userId },
+                data: {
+                  balance: newBal,
+                  lifetimeBurned: { increment: burnAmount },
+                },
+              });
+            } catch (e: any) {
+              if (e.code !== "P2002") throw e;
+            }
+          }
+
+          // Invalidate other pending transactions
+          await tx.transaction.updateMany({
+            where: {
+              bookingId: booking.id,
+              status: PaymentStatus.PENDING,
+              id: { not: txRecord.id },
+            },
+            data: { status: PaymentStatus.ABANDONED },
+          });
+
+          // Transition transaction to SUCCESSFUL
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: {
+              status: PaymentStatus.SUCCESSFUL,
+              paidAt: now,
+              gatewayResponse: gatewayPayload || undefined,
+              webhookEventId: eventId || undefined,
+              webhookReceivedAt: eventId ? now : undefined,
+              paystackChannel: gatewayPayload?.channel || undefined,
+            },
+          });
+
+          // Transition booking to CONFIRMED
+          const qrToken = generateSignedQrToken({
+            bookingId: booking.id,
+            reference: booking.reference,
+            userId: booking.userId,
+            startTime:
+              booking.startTime instanceof Date
+                ? booking.startTime.toISOString()
+                : String(booking.startTime),
+            endTime:
+              booking.endTime instanceof Date
+                ? booking.endTime.toISOString()
+                : String(booking.endTime),
+            issuedAt: Date.now(),
+          });
+          await tx.booking.update({
+            where: { id: booking.id },
+            data: {
+              state: BookingState.CONFIRMED,
+              qrToken,
+              holdExpiresAt: null,
+            },
+          });
+
+          // Create invoice
+          await this.invoices.createInvoiceForTransaction(tx, {
+            transactionId: txRecord.id,
+            bookingId: booking.id,
+            userId: booking.userId,
+            customerName,
+            customerEmail: user?.email || "customer@daih.ng",
+            customerClientId:
+              user?.clientId ||
+              `DAIH-CUS-${booking.userId.slice(0, 8).toUpperCase()}`,
+            resourceName: resource?.name || "Workspace",
+            bookingReference: booking.reference,
+            amount: Number(txRecord.amount),
+            currency: txRecord.currency,
+          });
+
+          await tx.auditLog.create({
+            data: {
+              userId: booking.userId,
+              action: "PAYMENT_SUCCESSFUL",
+              entityType: "Transaction",
+              entityId: txRecord.id,
+              metadata: {
+                bookingId: booking.id,
+                reference: txRecord.reference,
+                amount: Number(txRecord.amount),
+              },
+            },
+          });
+
+          await loyaltyService.awardPaymentReward(tx, txRecord.id);
+
+          await outboxService.recordEvent(
+            {
+              eventType: "payment.successful",
+              aggregateType: "Transaction",
+              aggregateId: txRecord.id,
+              payload: {
+                transactionId: txRecord.id,
+                bookingId: booking.id,
+                reference: booking.reference,
+                amount: Number(txRecord.amount),
+                currency: txRecord.currency,
+                customerEmail: user?.email,
+                customerName,
+              },
+            },
+            tx,
+          );
+
+          await outboxService.recordEvent(
+            {
+              eventType: "booking.confirmed",
+              aggregateType: "Booking",
+              aggregateId: booking.id,
+              payload: {
+                bookingId: booking.id,
+                reference: booking.reference,
+                qrToken,
+                customerEmail: user?.email,
+              },
+            },
+            tx,
+          );
+
+          await cancelHoldExpiryJob(booking.id);
+
+          return {
+            status: PaymentStatus.SUCCESSFUL,
+            confirmed: true,
+            reference: txRecord.reference,
+            message: "Payment confirmed successfully",
+          };
+        } else {
+          // CASE D: Expired Hold
+          // Lock facility resource
+          const [resLock] = await tx.$queryRaw<
+            Array<{ id: string; capacity: number }>
+          >`
+            SELECT id, capacity FROM "facility_resources" WHERE id = ${booking.resourceId} FOR UPDATE
+          `;
+          const capacity = resLock?.capacity || resource?.capacity || 1;
+
+          // Re-check capacity excluding this booking's own row
+          const [reservedRow] = await tx.$queryRaw<
+            Array<{ reserved_quantity: number }>
+          >`
+            SELECT COALESCE(SUM("quantity"), 0)::int AS reserved_quantity
+            FROM "bookings"
+            WHERE "resourceId" = ${booking.resourceId}
+              AND "id" <> ${booking.id}
+              AND "state" IN ('HELD', 'PENDING_PAYMENT', 'CONFIRMED', 'CHECKED_IN', 'ACTIVE')
+              AND ("state" NOT IN ('HELD', 'PENDING_PAYMENT') OR "holdExpiresAt" > NOW())
+              AND "startTime" < ${booking.endTime} AND "endTime" > ${booking.startTime}
+          `;
+
+          const reserved = Number(reservedRow?.reserved_quantity || 0);
+          if (reserved + Number(booking.quantity) > capacity) {
+            // Capacity is gone!
+            await tx.transaction.update({
+              where: { id: txRecord.id },
+              data: { status: PaymentStatus.REQUIRES_RECONCILIATION },
+            });
+            await spawnSystemRefund(
+              RefundReasonCode.UNAVAILABLE_RESOURCE,
+              "Hold expired and resource capacity was claimed by another customer",
+            );
+            await tx.auditLog.create({
+              data: {
+                userId: booking.userId,
+                action: "LATE_PAYMENT_CAPACITY_CONFLICT",
+                entityType: "Booking",
+                entityId: booking.id,
+                metadata: {
+                  bookingId: booking.id,
+                  reserved,
+                  quantity: booking.quantity,
+                  capacity,
+                },
+              },
+            });
+            await outboxService.recordEvent(
+              {
+                eventType: "admin.payment_flagged",
+                aggregateType: "Transaction",
+                aggregateId: txRecord.id,
+                payload: {
+                  transactionId: txRecord.id,
+                  bookingId: booking.id,
+                  reasonCode: "UNAVAILABLE_RESOURCE",
+                  conflict: "CAPACITY_FULL",
+                },
+              },
+              tx,
+            );
+            return {
+              status: PaymentStatus.REQUIRES_RECONCILIATION,
+              confirmed: false,
+              reference: txRecord.reference,
+              message: "Capacity no longer available; refund initiated",
+            };
+          }
+
+          // Capacity IS available! Re-check spendable coins if coins were redeemed
+          const coinsRedeemedDecimal = new Prisma.Decimal(
+            booking.coinsRedeemed,
+          );
+          if (coinsRedeemedDecimal.gt(0)) {
+            const [balanceRow] = await tx.$queryRaw<
+              Array<{ balance: Prisma.Decimal }>
+            >`
+              SELECT balance FROM "coin_balances" WHERE "userId" = ${booking.userId} FOR UPDATE
+            `;
+            const [activeHoldsRow] = await tx.$queryRaw<
+              Array<{ active_holds: Prisma.Decimal }>
+            >`
+              SELECT COALESCE(SUM(amount), 0)::numeric as active_holds FROM "coin_holds" WHERE "userId" = ${booking.userId} AND status = 'ACTIVE' AND "bookingId" <> ${booking.id}
+            `;
+            const currentBal = new Prisma.Decimal(balanceRow?.balance || 0);
+            const activeHolds = new Prisma.Decimal(
+              activeHoldsRow?.active_holds || 0,
+            );
+            const spendable = currentBal.sub(activeHolds);
+
+            if (spendable.lt(coinsRedeemedDecimal)) {
+              // User spent coins elsewhere while hold expired!
+              await tx.transaction.update({
+                where: { id: txRecord.id },
+                data: { status: PaymentStatus.REQUIRES_RECONCILIATION },
+              });
+              await spawnSystemRefund(
+                RefundReasonCode.UNAVAILABLE_RESOURCE,
+                "Hold expired and spendable coins are no longer sufficient to cover redeemed amount",
+              );
+              await tx.auditLog.create({
+                data: {
+                  userId: booking.userId,
+                  action: "LATE_PAYMENT_COINS_CONFLICT",
+                  entityType: "Booking",
+                  entityId: booking.id,
+                  metadata: {
+                    bookingId: booking.id,
+                    spendable: spendable.toNumber(),
+                    required: coinsRedeemedDecimal.toNumber(),
+                  },
+                },
+              });
+              await outboxService.recordEvent(
+                {
+                  eventType: "admin.payment_flagged",
+                  aggregateType: "Transaction",
+                  aggregateId: txRecord.id,
+                  payload: {
+                    transactionId: txRecord.id,
+                    bookingId: booking.id,
+                    reasonCode: "UNAVAILABLE_RESOURCE",
+                    conflict: "INSUFFICIENT_COINS",
+                  },
+                },
+                tx,
+              );
+              return {
+                status: PaymentStatus.REQUIRES_RECONCILIATION,
+                confirmed: false,
+                reference: txRecord.reference,
+                message: "Coins no longer available; refund initiated",
+              };
+            }
+
+            // Spendable coins ARE sufficient! Re-burn coins
+            await tx.coinHold.updateMany({
+              where: { bookingId: booking.id },
+              data: { status: HoldStatus.BURNED },
+            });
+
+            const newBal = currentBal.sub(coinsRedeemedDecimal);
+            try {
+              await tx.coinLedgerEntry.create({
+                data: {
+                  userId: booking.userId,
+                  action: CoinLedgerAction.HOLD_BURNED,
+                  amount: coinsRedeemedDecimal.negated(),
+                  balanceAfter: newBal,
+                  referenceType: "Booking",
+                  referenceId: booking.id,
+                  idempotencyKey: `burn_booking_${booking.id}`,
+                  metadata: {
+                    bookingId: booking.id,
+                    transactionId: txRecord.id,
+                  },
+                },
+              });
+              await tx.coinBalance.update({
+                where: { userId: booking.userId },
+                data: {
+                  balance: newBal,
+                  lifetimeBurned: { increment: coinsRedeemedDecimal },
+                },
+              });
+            } catch (e: any) {
+              if (e.code !== "P2002") throw e;
+            }
+          }
+
+          // Invalidate other pending transactions
+          await tx.transaction.updateMany({
+            where: {
+              bookingId: booking.id,
+              status: PaymentStatus.PENDING,
+              id: { not: txRecord.id },
+            },
+            data: { status: PaymentStatus.ABANDONED },
+          });
+
+          // Transition transaction to SUCCESSFUL
+          await tx.transaction.update({
+            where: { id: txRecord.id },
+            data: {
+              status: PaymentStatus.SUCCESSFUL,
+              paidAt: now,
+              gatewayResponse: gatewayPayload || undefined,
+            },
+          });
+
+          // Re-confirm booking
+          const qrToken = generateSignedQrToken({
+            bookingId: booking.id,
+            reference: booking.reference,
+            userId: booking.userId,
+            startTime:
+              booking.startTime instanceof Date
+                ? booking.startTime.toISOString()
+                : String(booking.startTime),
+            endTime:
+              booking.endTime instanceof Date
+                ? booking.endTime.toISOString()
+                : String(booking.endTime),
+            issuedAt: Date.now(),
+          });
+          await tx.booking.update({
+            where: { id: booking.id },
+            data: {
+              state: BookingState.CONFIRMED,
+              qrToken,
+              holdExpiresAt: null,
+            },
+          });
+
+          // Create invoice
+          await this.invoices.createInvoiceForTransaction(tx, {
+            transactionId: txRecord.id,
+            bookingId: booking.id,
+            userId: booking.userId,
+            customerName,
+            customerEmail: user?.email || "customer@daih.ng",
+            customerClientId:
+              user?.clientId ||
+              `DAIH-CUS-${booking.userId.slice(0, 8).toUpperCase()}`,
+            resourceName: resource?.name || "Workspace",
+            bookingReference: booking.reference,
+            amount: Number(txRecord.amount),
+            currency: txRecord.currency,
+          });
+
+          await tx.auditLog.create({
+            data: {
+              userId: booking.userId,
+              action: "PAYMENT_SUCCESSFUL",
+              entityType: "Transaction",
+              entityId: txRecord.id,
+              metadata: {
+                bookingId: booking.id,
+                reference: txRecord.reference,
+                amount: Number(txRecord.amount),
+                lateConfirmed: true,
+              },
+            },
+          });
+
+          await loyaltyService.awardPaymentReward(tx, txRecord.id);
+
+          await outboxService.recordEvent(
+            {
+              eventType: "payment.successful",
+              aggregateType: "Transaction",
+              aggregateId: txRecord.id,
+              payload: {
+                transactionId: txRecord.id,
+                bookingId: booking.id,
+                reference: booking.reference,
+                amount: Number(txRecord.amount),
+                currency: txRecord.currency,
+                customerEmail: user?.email,
+                customerName,
+              },
+            },
+            tx,
+          );
+
+          await outboxService.recordEvent(
+            {
+              eventType: "booking.confirmed",
+              aggregateType: "Booking",
+              aggregateId: booking.id,
+              payload: {
+                bookingId: booking.id,
+                reference: booking.reference,
+                qrToken,
+                customerEmail: user?.email,
+              },
+            },
+            tx,
+          );
+
+          await cancelHoldExpiryJob(booking.id);
+
+          return {
+            status: PaymentStatus.SUCCESSFUL,
+            confirmed: true,
+            reference: txRecord.reference,
+            message: "Late payment reconfirmed successfully",
+          };
+        }
+      },
+      { timeout: 20000, maxWait: 15000 },
+    );
   }
 
   /**
@@ -341,314 +1299,59 @@ export class PaymentsService {
       return { received: true, orphan: true };
     }
 
-    // 3. Process event inside atomic PostgreSQL transaction
-    await prisma.$transaction(
-      async (tx) => {
-        if (event.event === "charge.success") {
-          // Check fresh database state inside transaction to prevent concurrency races
-          const currentTx = await tx.transaction.findUnique({
-            where: { id: transaction.id },
-          });
-          if (currentTx && currentTx.status === PaymentStatus.SUCCESSFUL) {
-            console.log(
-              `⚡ Transaction '${transaction.reference}' is already SUCCESSFUL`,
-            );
-            return;
-          }
+    if (event.event === "charge.success") {
+      const result = await this.reconcilePaymentTransaction(
+        transaction.id,
+        event.data,
+        eventId,
+      );
+      return { received: true, processed: true, ...result };
+    } else if (
+      event.event === "charge.failed" ||
+      event.event === "paymentrequest.failed"
+    ) {
+      await prisma.transaction.update({
+        where: { id: transaction.id },
+        data: {
+          status: PaymentStatus.FAILED,
+          failedAt: new Date(),
+          webhookEventId: eventId || null,
+          webhookReceivedAt: new Date(),
+          gatewayResponse: {
+            gateway_response: event.data.gateway_response || "Failed",
+          },
+        },
+      });
 
-          const paidAt = event.data.paid_at
-            ? new Date(event.data.paid_at)
-            : new Date();
+      await prisma.auditLog.create({
+        data: {
+          userId: transaction.userId,
+          action: "PAYMENT_FAILED",
+          entityType: "Transaction",
+          entityId: transaction.id,
+          metadata: {
+            reference: transaction.reference,
+            paystackEventId: eventId,
+            gatewayResponse: event.data.gateway_response,
+          },
+        },
+      });
 
-          // Sanitize gateway response
-          const gatewayResponse = {
-            gateway_response: event.data.gateway_response || "Approved",
-            channel: event.data.channel || "card",
-            ip_address: event.data.ip_address || null,
-            customer: event.data.customer || null,
-            authorization: event.data.authorization || null,
-          };
+      await outboxService.recordEvent({
+        eventType: "payment.failed",
+        aggregateType: "Transaction",
+        aggregateId: transaction.id,
+        payload: {
+          transactionId: transaction.id,
+          bookingId: transaction.bookingId,
+          reference: transaction.reference,
+        },
+      });
 
-          // Update transaction
-          await tx.transaction.update({
-            where: { id: transaction.id },
-            data: {
-              status: PaymentStatus.SUCCESSFUL,
-              paidAt,
-              webhookEventId: eventId || null,
-              webhookReceivedAt: new Date(),
-              paystackChannel: event.data.channel || "card",
-              gatewayResponse: gatewayResponse as any,
-            },
-          });
+      return { received: true, processed: true };
+    }
 
-          // Fetch fresh booking state
-          const booking = await tx.booking.findUnique({
-            where: { id: transaction.bookingId },
-            include: {
-              resource: true,
-              user: true,
-            },
-          });
-
-          if (booking) {
-            const customerName =
-              `${booking.user.firstName || ""} ${booking.user.lastName || ""}`.trim() ||
-              "Valued Customer";
-            let qrToken: string | undefined;
-
-            const canConfirm =
-              booking.state === BookingState.HELD ||
-              booking.state === BookingState.PENDING_PAYMENT ||
-              booking.state === BookingState.EXPIRED;
-
-            if (canConfirm) {
-              // Handle late recovery if booking was EXPIRED
-              if (booking.state === BookingState.EXPIRED) {
-                const activeCount =
-                  await bookingRepository.countActiveOverlappingBookings(
-                    tx,
-                    booking.resourceId,
-                    booking.startTime,
-                    booking.endTime,
-                    booking.id,
-                  );
-
-                if (activeCount >= (booking.resource?.capacity || 1)) {
-                  // Cannot confirm on this slot because capacity was taken by another user after hold expiry.
-                  // Under the No-Refund Policy: We DO NOT refund. We retain the payment as SUCCESSFUL,
-                  // set the booking state to NO_SHOW, and create an audit alert for the Operations Manager.
-                  await tx.booking.update({
-                    where: { id: booking.id },
-                    data: {
-                      state: BookingState.NO_SHOW,
-                      holdExpiresAt: null,
-                    },
-                  });
-
-                  // Create Invoice for retained payment
-                  await this.invoices.createInvoiceForTransaction(tx, {
-                    transactionId: transaction.id,
-                    bookingId: booking.id,
-                    userId: booking.userId,
-                    customerName,
-                    customerEmail: booking.user.email,
-                    customerClientId:
-                      booking.user.clientId ||
-                      `DAIH-CUS-${booking.userId.slice(0, 8).toUpperCase()}`,
-                    resourceName: booking.resource?.name || "Workspace",
-                    bookingReference: booking.reference,
-                    amount: Number(transaction.amount),
-                    currency: transaction.currency,
-                  });
-
-                  // Write AuditLog for Capacity Conflict
-                  await tx.auditLog.create({
-                    data: {
-                      userId: booking.userId,
-                      action: "LATE_PAYMENT_CAPACITY_CONFLICT",
-                      entityType: "Booking",
-                      entityId: booking.id,
-                      metadata: {
-                        bookingId: booking.id,
-                        reference: booking.reference,
-                        resourceId: booking.resourceId,
-                        amount: Number(transaction.amount),
-                        currency: transaction.currency,
-                        reason:
-                          "Late payment confirmed after hold expiry; slot was occupied by another reservation. Marked as NO_SHOW for Operations Admin discretionary rescheduling.",
-                      },
-                    },
-                  });
-
-                  // Outbox Event
-                  await outboxService.recordEvent(
-                    {
-                      eventType: "payment.capacity_conflict",
-                      aggregateType: "Booking",
-                      aggregateId: booking.id,
-                      payload: {
-                        transactionId: transaction.id,
-                        bookingId: booking.id,
-                        reference: booking.reference,
-                        amount: Number(transaction.amount),
-                        customerEmail: booking.user.email,
-                        customerName,
-                        requiresReschedule: true,
-                      },
-                    },
-                    tx,
-                  );
-
-                  console.warn(
-                    `⚠️ Late payment confirmed for expired booking '${booking.reference}', but slot is occupied. Retained payment and flagged for Operations Admin rescheduling.`,
-                  );
-                  return;
-                }
-              }
-
-              // Confirm booking
-              assertValidTransition(
-                booking.state as any,
-                BookingState.CONFIRMED,
-                booking.id,
-              );
-
-              qrToken = `daih_qr_${booking.id}_${Date.now()}`;
-              await tx.booking.update({
-                where: { id: booking.id },
-                data: {
-                  state: BookingState.CONFIRMED,
-                  qrToken,
-                  holdExpiresAt: null,
-                },
-              });
-
-              // Generate Invoice
-              await this.invoices.createInvoiceForTransaction(tx, {
-                transactionId: transaction.id,
-                bookingId: booking.id,
-                userId: booking.userId,
-                customerName,
-                customerEmail: booking.user.email,
-                customerClientId:
-                  booking.user.clientId ||
-                  `DAIH-CUS-${booking.userId.slice(0, 8).toUpperCase()}`,
-                resourceName: booking.resource?.name || "Workspace",
-                bookingReference: booking.reference,
-                amount: Number(transaction.amount),
-                currency: transaction.currency,
-              });
-
-              // Confirm discount redemption if applicable
-              await discountService.confirmRedemptionTx(
-                tx,
-                booking.id,
-                transaction.id,
-              );
-
-              // Confirm PD Coin redemption if applicable
-              await loyaltyService.confirmBookingRedemption(tx, booking.id);
-
-              // Cancel delayed hold expiry job
-              await cancelHoldExpiryJob(booking.id);
-            } else {
-              console.warn(
-                `⚠️ Late payment received for booking '${booking.reference}' currently in terminal state '${booking.state}'. Retaining booking state and logging for finance review.`,
-              );
-            }
-
-            // Audit log
-            await tx.auditLog.create({
-              data: {
-                userId: booking.userId,
-                action: "PAYMENT_SUCCESSFUL",
-                entityType: "Transaction",
-                entityId: transaction.id,
-                metadata: {
-                  bookingId: booking.id,
-                  bookingReference: booking.reference,
-                  amount: Number(transaction.amount),
-                  currency: transaction.currency,
-                  reference: transaction.reference,
-                  paystackEventId: eventId,
-                  channel: event.data.channel,
-                },
-              },
-            });
-
-            // Award PD Coin loyalty reward & active referral bonus
-            await loyaltyService.awardPaymentReward(tx, transaction.id);
-
-            // Outbox events
-            await outboxService.recordEvent(
-              {
-                eventType: "payment.successful",
-                aggregateType: "Transaction",
-                aggregateId: transaction.id,
-                payload: {
-                  transactionId: transaction.id,
-                  bookingId: booking.id,
-                  bookingReference: booking.reference,
-                  amount: Number(transaction.amount),
-                  currency: transaction.currency,
-                  customerEmail: booking.user.email,
-                  customerName,
-                },
-              },
-              tx,
-            );
-
-            if (qrToken) {
-              await outboxService.recordEvent(
-                {
-                  eventType: "booking.confirmed",
-                  aggregateType: "Booking",
-                  aggregateId: booking.id,
-                  payload: {
-                    bookingId: booking.id,
-                    reference: booking.reference,
-                    qrToken,
-                    customerEmail: booking.user.email,
-                  },
-                },
-                tx,
-              );
-            }
-          }
-        } else if (
-          event.event === "charge.failed" ||
-          event.event === "paymentrequest.failed"
-        ) {
-          await tx.transaction.update({
-            where: { id: transaction.id },
-            data: {
-              status: PaymentStatus.FAILED,
-              failedAt: new Date(),
-              webhookEventId: eventId || null,
-              webhookReceivedAt: new Date(),
-              gatewayResponse: {
-                gateway_response: event.data.gateway_response || "Failed",
-              },
-            },
-          });
-
-          await tx.auditLog.create({
-            data: {
-              userId: transaction.userId,
-              action: "PAYMENT_FAILED",
-              entityType: "Transaction",
-              entityId: transaction.id,
-              metadata: {
-                reference: transaction.reference,
-                paystackEventId: eventId,
-                gatewayResponse: event.data.gateway_response,
-              },
-            },
-          });
-
-          await outboxService.recordEvent(
-            {
-              eventType: "payment.failed",
-              aggregateType: "Transaction",
-              aggregateId: transaction.id,
-              payload: {
-                transactionId: transaction.id,
-                bookingId: transaction.bookingId,
-                reference: transaction.reference,
-              },
-            },
-            tx,
-          );
-        }
-      },
-      {
-        maxWait: 15000,
-        timeout: 20000,
-      },
-    );
-
-    return { received: true, processed: true };
+    return { received: true, ignored: true };
   }
 
   /**
@@ -705,10 +1408,7 @@ export class PaymentsService {
         );
         if (verifyRes && verifyRes.data) {
           if (verifyRes.data.status === "success") {
-            await this.handleWebhookEvent({
-              event: "charge.success",
-              data: verifyRes.data as any,
-            });
+            await this.reconcilePaymentTransaction(tx.id, verifyRes.data);
             tx = await this.repo.findById(tx.id);
           } else if (
             verifyRes.data.status === "failed" ||

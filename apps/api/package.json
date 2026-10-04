@@ -21,7 +21,8 @@
     "create:admin": "tsx src/scripts/create-admin.ts",
     "seed:templates": "tsx src/db/seeds/email-templates.seed.ts",
     "seed:loyalty": "tsx src/db/seeds/loyalty-settings.seed.ts",
-    "ledger:reconcile": "tsx src/scripts/reconcile-ledger.ts"
+    "ledger:reconcile": "tsx src/scripts/reconcile-ledger.ts",
+    "policy:sanitize": "tsx src/scripts/sanitize-policies.ts"
   },
   "dependencies": {
     "@daih/types": "workspace:*",
@@ -46,6 +47,7 @@
     "pg": "^8.13.3",
     "rate-limit-redis": "^4.2.0",
     "resend": "^4.1.2",
+    "sanitize-html": "^2.18.0",
     "sharp": "^0.35.4",
     "swagger-ui-express": "^5.0.1",
     "zod": "^3.24.2"
@@ -60,6 +62,7 @@
     "@types/morgan": "^1.9.9",
     "@types/node": "^22.13.9",
     "@types/pg": "^8.11.11",
+    "@types/sanitize-html": "^2.16.2",
     "@types/supertest": "^6.0.2",
     "@types/swagger-ui-express": "^4.1.8",
     "openapi-types": "^12.1.3",

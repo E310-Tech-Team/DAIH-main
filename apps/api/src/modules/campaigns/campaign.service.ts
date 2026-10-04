@@ -976,7 +976,6 @@ export class CampaignService {
       subject,
       body,
       previewText: subject,
-      confidenceScore: 0.94,
     };
   }
 

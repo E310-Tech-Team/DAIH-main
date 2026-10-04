@@ -12,8 +12,38 @@ export interface QrTokenPayload {
 
 const QR_TOKEN_PREFIX = "daih_pass_v1";
 
-function getSigningSecret(): string {
-  return config.qrSigningSecret || "dev-qr-signing-key-1234567890";
+export function getActiveKeyId(): string {
+  return process.env.QR_ACTIVE_KEY_ID || "v1";
+}
+
+export function getKeyring(): Record<string, string> {
+  const activeKid = getActiveKeyId();
+  const activeSecret =
+    config.qrSigningSecret || "dev-qr-signing-key-1234567890";
+  const keyring: Record<string, string> = {
+    [activeKid]: activeSecret,
+    v1: activeSecret,
+    primary: activeSecret,
+  };
+
+  if (process.env.QR_SIGNING_KEYRING) {
+    try {
+      const parsed = JSON.parse(process.env.QR_SIGNING_KEYRING);
+      Object.assign(keyring, parsed);
+    } catch {
+      process.env.QR_SIGNING_KEYRING.split(",").forEach((pair) => {
+        const [k, v] = pair.split(":");
+        if (k && v) keyring[k.trim()] = v.trim();
+      });
+    }
+  }
+
+  return keyring;
+}
+
+export function getKeyForKid(kid: string): string | undefined {
+  const keyring = getKeyring();
+  return keyring[kid];
 }
 
 /**
@@ -39,14 +69,20 @@ function base64UrlDecode(input: string): string {
 }
 
 /**
- * Generates a cryptographically signed, opaque digital access pass token (HMAC-SHA256).
- * Output format: "daih_pass_v1.<payload_b64>.<signature_b64>"
+ * Generates a cryptographically signed digital access pass token (HMAC-SHA256).
+ * Output format: "daih_pass_v1.<kid>.<payload_b64>.<signature_b64>"
  */
-export function generateSignedQrToken(payload: QrTokenPayload): string {
-  const secret = getSigningSecret();
+export function generateSignedQrToken(
+  payload: QrTokenPayload,
+  kid: string = getActiveKeyId(),
+): string {
+  const secret =
+    getKeyForKid(kid) ||
+    config.qrSigningSecret ||
+    "dev-qr-signing-key-1234567890";
   const serialized = JSON.stringify(payload);
   const payloadB64 = base64UrlEncode(serialized);
-  const dataToSign = `${QR_TOKEN_PREFIX}.${payloadB64}`;
+  const dataToSign = `${QR_TOKEN_PREFIX}.${kid}.${payloadB64}`;
 
   const signature = crypto
     .createHmac("sha256", secret)
@@ -62,13 +98,18 @@ export function generateSignedQrToken(payload: QrTokenPayload): string {
 export interface QrTokenParseResult {
   valid: boolean;
   payload?: QrTokenPayload;
-  error?: "MALFORMED_TOKEN" | "INVALID_SIGNATURE" | "UNSUPPORTED_VERSION";
+  error?:
+    | "MALFORMED_TOKEN"
+    | "INVALID_SIGNATURE"
+    | "UNSUPPORTED_VERSION"
+    | "INVALID_KEY_ID";
   message?: string;
 }
 
 /**
- * Verifies the cryptographic HMAC-SHA256 signature of a QR pass token and extracts payload.
- * Uses constant-time comparison to prevent timing attacks.
+ * Verifies cryptographic signature of a QR pass token and extracts payload.
+ * Supports both 4-part rotated key format and backward-compatible 3-part format.
+ * Validates buffer lengths before timingSafeEqual to avoid timing attack oracles.
  */
 export function verifyAndParseQrToken(tokenString: string): QrTokenParseResult {
   if (!tokenString || typeof tokenString !== "string") {
@@ -80,23 +121,7 @@ export function verifyAndParseQrToken(tokenString: string): QrTokenParseResult {
   }
 
   const parts = tokenString.trim().split(".");
-  if (parts.length !== 3) {
-    // Check if legacy test format `daih_qr_<id>_<timestamp>`
-    if (tokenString.startsWith("daih_qr_")) {
-      const segs = tokenString.split("_");
-      return {
-        valid: true,
-        payload: {
-          bookingId: segs[2] || "",
-          reference: "LEGACY-REF",
-          userId: "",
-          startTime: new Date().toISOString(),
-          endTime: new Date(Date.now() + 86400000).toISOString(),
-          issuedAt: Date.now(),
-        },
-      };
-    }
-
+  if (parts.length !== 3 && parts.length !== 4) {
     return {
       valid: false,
       error: "MALFORMED_TOKEN",
@@ -104,18 +129,50 @@ export function verifyAndParseQrToken(tokenString: string): QrTokenParseResult {
     };
   }
 
-  const [prefix, payloadB64, signatureB64] = parts;
+  let prefix: string;
+  let kid: string;
+  let payloadB64: string;
+  let signatureB64: string;
+  let dataToSign: string;
+  let secret: string | undefined;
 
-  if (prefix !== QR_TOKEN_PREFIX) {
-    return {
-      valid: false,
-      error: "UNSUPPORTED_VERSION",
-      message: `Unsupported access token format '${prefix}'`,
-    };
+  if (parts.length === 4) {
+    // Rotated key format: daih_pass_v1.<kid>.<payload_b64>.<signature_b64>
+    [prefix, kid, payloadB64, signatureB64] = parts;
+    if (prefix !== QR_TOKEN_PREFIX) {
+      return {
+        valid: false,
+        error: "UNSUPPORTED_VERSION",
+        message: `Unsupported access token format '${prefix}'`,
+      };
+    }
+    secret = getKeyForKid(kid);
+    if (!secret) {
+      return {
+        valid: false,
+        error: "INVALID_KEY_ID",
+        message: `Unknown or retired key ID '${kid}'`,
+      };
+    }
+    dataToSign = `${prefix}.${kid}.${payloadB64}`;
+  } else {
+    // Backward-compatible 3-part format: daih_pass_v1.<payload_b64>.<signature_b64>
+    [prefix, payloadB64, signatureB64] = parts;
+    if (prefix !== QR_TOKEN_PREFIX) {
+      return {
+        valid: false,
+        error: "UNSUPPORTED_VERSION",
+        message: `Unsupported access token format '${prefix}'`,
+      };
+    }
+    kid = "v1";
+    secret =
+      getKeyForKid(kid) ||
+      config.qrSigningSecret ||
+      "dev-qr-signing-key-1234567890";
+    dataToSign = `${prefix}.${payloadB64}`;
   }
 
-  const secret = getSigningSecret();
-  const dataToSign = `${prefix}.${payloadB64}`;
   const expectedSignatureB64 = crypto
     .createHmac("sha256", secret)
     .update(dataToSign)
@@ -127,6 +184,7 @@ export function verifyAndParseQrToken(tokenString: string): QrTokenParseResult {
   const sigBuffer = Buffer.from(signatureB64, "utf8");
   const expectedSigBuffer = Buffer.from(expectedSignatureB64, "utf8");
 
+  // Constant-time length guard: check buffer length equality before calling timingSafeEqual
   if (
     sigBuffer.length !== expectedSigBuffer.length ||
     !crypto.timingSafeEqual(sigBuffer, expectedSigBuffer)

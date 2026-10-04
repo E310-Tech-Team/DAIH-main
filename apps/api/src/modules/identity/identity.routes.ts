@@ -17,6 +17,7 @@ import {
   verificationResendRateLimiter,
   passwordResetRateLimiter,
   refreshRateLimiter,
+  oauthExchangeRateLimiter,
 } from "../../middleware/rate-limit.middleware.js";
 import {
   registerSchema,
@@ -40,6 +41,9 @@ import {
   policyConsentSchema,
   profileMfaInitiateSchema,
   profileMfaConfirmSchema,
+  oauthExchangeSchema,
+  deactivateAccountSchema,
+  reactivateAccountSchema,
 } from "./identity.schema.js";
 
 export const identityRouter = Router();
@@ -84,6 +88,13 @@ identityRouter.get(
   "/oauth/google/callback",
   loginRateLimiter,
   identityController.handleGoogleOAuthCallback,
+);
+
+identityRouter.post(
+  "/oauth/exchange",
+  oauthExchangeRateLimiter,
+  validateBody(oauthExchangeSchema),
+  identityController.exchangeOAuthCode,
 );
 
 // NDPR Policy Consent
@@ -296,4 +307,27 @@ identityRouter.get(
   authenticate,
   requireRoles([UserRole.SUPER_ADMIN]),
   identityController.debugClientIp,
+);
+
+// Customer Account Closure (Self-Service)
+identityRouter.post(
+  "/account/request-deactivation-otp",
+  authenticate,
+  identityController.requestDeactivationOtp,
+);
+
+identityRouter.post(
+  "/account/deactivate",
+  authenticate,
+  validateBody(deactivateAccountSchema),
+  identityController.deactivateAccount,
+);
+
+// Support-Led Account Reactivation (Strictly Super Admin)
+identityRouter.post(
+  "/account/reactivate",
+  authenticate,
+  requireRoles([UserRole.SUPER_ADMIN]),
+  validateBody(reactivateAccountSchema),
+  identityController.reactivateAccount,
 );

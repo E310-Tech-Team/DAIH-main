@@ -444,10 +444,7 @@ export class AccessService {
     let booking: any = null;
 
     // 1. Try resolving if input is a signed QR token
-    if (
-      rawInput.startsWith("daih_pass_v1.") ||
-      rawInput.startsWith("daih_qr_")
-    ) {
+    if (rawInput.startsWith("daih_pass_v1.")) {
       const parseResult = verifyAndParseQrToken(rawInput);
       if (!parseResult.valid) {
         return {
@@ -826,84 +823,125 @@ export class AccessService {
       (booking.state === BookingState.CHECKED_IN && !checkedInToday);
 
     // Transactional check-in: update booking & create visit session & audit log
-    const { updatedBooking, visitSession } = await prisma.$transaction(
-      async (tx) => {
-        const b = await tx.booking.update({
-          where: { id: booking.id },
-          data: {
-            state: BookingState.CHECKED_IN,
-            ...(isFirstCheckIn ? { checkedInAt: now } : {}),
-          },
-          include: {
-            resource: true,
-            user: true,
-            visitSessions: {
-              orderBy: { checkInTime: "desc" },
+    let txResult: { updatedBooking: any; visitSession: any };
+    try {
+      txResult = await prisma.$transaction(
+        async (tx) => {
+          // Compare-and-Set: only allow state transition from CONFIRMED, CHECKED_OUT, or re-entry
+          const updateRes = await tx.booking.updateMany({
+            where: {
+              id: booking.id,
+              state: {
+                in: [
+                  BookingState.CONFIRMED,
+                  BookingState.CHECKED_OUT,
+                  ...(isReEntry ? [BookingState.CHECKED_IN] : []),
+                ],
+              },
             },
-          },
-        });
+            data: {
+              state: BookingState.CHECKED_IN,
+              ...(isFirstCheckIn ? { checkedInAt: now } : {}),
+            },
+          });
 
-        const vs = await tx.visitSession.create({
-          data: {
-            bookingId: booking.id,
-            userId: booking.userId,
-            staffUserId: options.staffUserId,
-            terminalId: options.terminalId || "REC-GATE-01",
-            checkInTime: now,
-            ipAddress: options.ipAddress,
-            notes: options.notes,
-          },
-        });
+          if (updateRes.count === 0) {
+            const err: any = new Error(
+              `Booking '${booking.reference}' is already checked in or not in a checkable state`,
+            );
+            err.statusCode = 409;
+            err.code = "ALREADY_CHECKED_IN";
+            throw err;
+          }
 
-        // Audit Log
-        await tx.auditLog.create({
-          data: {
-            userId: options.staffUserId || null,
-            action: isReEntry
-              ? "ACCESS_MEMBER_RE_CHECK_IN"
-              : "ACCESS_MEMBER_CHECK_IN",
-            entityType: "Booking",
-            entityId: booking.id,
-            metadata: {
-              bookingReference: booking.reference,
+          const vs = await tx.visitSession.create({
+            data: {
+              bookingId: booking.id,
+              userId: booking.userId,
+              staffUserId: options.staffUserId,
               terminalId: options.terminalId || "REC-GATE-01",
-              isReEntry,
-              checkInTime: now.toISOString(),
+              checkInTime: now,
+              ipAddress: options.ipAddress,
               notes: options.notes,
             },
-            ipAddress: options.ipAddress,
-          },
-        });
+          });
 
-        // Outbox event
-        await outboxService.recordEvent(
-          {
-            eventType: "access.checked_in",
-            aggregateType: "Booking",
-            aggregateId: booking.id,
-            payload: {
-              bookingId: booking.id,
-              reference: booking.reference,
-              userId: booking.userId,
-              customerEmail: booking.user?.email,
-              customerName:
-                `${booking.user?.firstName || ""} ${booking.user?.lastName || ""}`.trim() ||
-                booking.user?.email,
-              resourceName: booking.resource?.name || "Workspace",
-              terminalId: options.terminalId || "REC-GATE-01",
-              staffUserId: options.staffUserId,
-              isReEntry,
-              checkInTime: now.toISOString(),
-              endTime: end.toISOString(),
+          const b = await tx.booking.findUnique({
+            where: { id: booking.id },
+            include: {
+              resource: true,
+              user: true,
+              visitSessions: {
+                orderBy: { checkInTime: "desc" },
+              },
             },
-          },
-          tx,
+          });
+
+          // Audit Log
+          await tx.auditLog.create({
+            data: {
+              userId: options.staffUserId || null,
+              action: isReEntry
+                ? "ACCESS_MEMBER_RE_CHECK_IN"
+                : "ACCESS_MEMBER_CHECK_IN",
+              entityType: "Booking",
+              entityId: booking.id,
+              metadata: {
+                bookingReference: booking.reference,
+                terminalId: options.terminalId || "REC-GATE-01",
+                isReEntry,
+                checkInTime: now.toISOString(),
+                notes: options.notes,
+              },
+              ipAddress: options.ipAddress,
+            },
+          });
+
+          // Outbox event
+          await outboxService.recordEvent(
+            {
+              eventType: "visit.checked_in",
+              aggregateType: "Booking",
+              aggregateId: booking.id,
+              payload: {
+                bookingId: booking.id,
+                reference: booking.reference,
+                userId: booking.userId,
+                customerEmail: booking.user?.email,
+                customerName:
+                  `${booking.user?.firstName || ""} ${booking.user?.lastName || ""}`.trim() ||
+                  booking.user?.email,
+                resourceName: booking.resource?.name || "Workspace",
+                terminalId: options.terminalId || "REC-GATE-01",
+                staffUserId: options.staffUserId,
+                isReEntry,
+                checkInTime: now.toISOString(),
+                endTime: end.toISOString(),
+              },
+            },
+            tx,
+          );
+
+          return { updatedBooking: b, visitSession: vs };
+        },
+        { timeout: 15000, maxWait: 10000 },
+      );
+    } catch (err: any) {
+      if (
+        err.code === "P2002" ||
+        err.message?.includes("idx_active_visit_session")
+      ) {
+        const conflictErr: any = new Error(
+          `Booking '${booking.reference}' already has an active visit session`,
         );
+        conflictErr.statusCode = 409;
+        conflictErr.code = "ALREADY_CHECKED_IN";
+        throw conflictErr;
+      }
+      throw err;
+    }
 
-        return { updatedBooking: b, visitSession: vs };
-      },
-    );
-
+    const { updatedBooking, visitSession } = txResult;
     const wifiCredentials = this.generateWifiCredentials(updatedBooking);
     const passDetails = this.formatPassDetails(updatedBooking, visitSession);
 

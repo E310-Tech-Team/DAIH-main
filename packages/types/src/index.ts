@@ -13,3 +13,4 @@ export * from "./notification.types";
 export * from "./loyalty.types";
 export * from "./review.types";
 export * from "./campaign.types";
+export * from "./url";

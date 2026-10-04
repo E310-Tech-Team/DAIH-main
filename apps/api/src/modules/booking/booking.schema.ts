@@ -48,6 +48,9 @@ export const CreateHoldSchema = z
       .datetime({ message: "Valid ISO startTime is required" }),
     endTime: z.string().datetime({ message: "Valid ISO endTime is required" }),
     planId: z.string().optional(),
+    quantity: z.number().int().min(1).default(1),
+    coinsToRedeem: z.number().nonnegative().optional().default(0),
+    redeemAll: z.boolean().optional().default(false),
     promoCode: z
       .string()
       .trim()

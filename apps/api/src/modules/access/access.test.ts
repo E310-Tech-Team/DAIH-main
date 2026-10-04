@@ -321,14 +321,13 @@ describe("Milestone 1.5: QR & Reception Module", () => {
       expect(res.body.code).toBe("FORBIDDEN");
     });
 
-    it("allows reception officers to view any member's access pass", async () => {
+    it("blocks reception officers from fetching customer's raw access pass (must use verify-qr scanner)", async () => {
       const res = await request(app)
         .get(`/api/v1/access/qr/${activeBookingId}`)
         .set("Authorization", `Bearer ${receptionToken}`);
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.reference).toBe(activeBookingRef);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("FORBIDDEN");
     });
   });
 

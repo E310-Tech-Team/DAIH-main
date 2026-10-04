@@ -456,6 +456,38 @@ export class NotificationsService {
 
     return this.createForEmail(payload?.customerEmail, base);
   }
+
+  async sendAdminAlert(title: string, message: string, metadata?: any) {
+    try {
+      const adminUsers = await prisma.user.findMany({
+        where: {
+          role: {
+            in: [
+              UserRole.SUPER_ADMIN,
+              UserRole.FINANCE_OFFICER,
+              UserRole.OPERATIONS_ADMIN,
+            ],
+          },
+        },
+        select: { id: true },
+      });
+      for (const admin of adminUsers) {
+        await this.createForUser({
+          userId: admin.id,
+          type: "admin.alert",
+          title,
+          message,
+          linkHref: "/finance",
+          metadata,
+        });
+      }
+    } catch (err: any) {
+      console.error(
+        "[Notifications] Failed to dispatch admin alert:",
+        err?.message,
+      );
+    }
+  }
 }
 
 export const notificationsService = new NotificationsService();

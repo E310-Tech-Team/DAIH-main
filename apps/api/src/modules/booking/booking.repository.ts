@@ -1,5 +1,10 @@
 import { prisma } from "../../db/client.js";
-import { BookingState, Prisma } from "@prisma/client";
+import {
+  BookingState,
+  PaymentStatus,
+  HoldStatus,
+  Prisma,
+} from "@prisma/client";
 import { ACTIVE_BOOKING_STATES } from "./booking.state-machine.js";
 import { outboxService } from "../events/outbox.service.js";
 
@@ -41,7 +46,7 @@ export class BookingRepository {
   ): Promise<number> {
     const now = new Date();
 
-    return tx.booking.count({
+    const aggregate = await tx.booking.aggregate({
       where: {
         resourceId,
         ...(excludeBookingId ? { id: { not: excludeBookingId } } : {}),
@@ -66,7 +71,12 @@ export class BookingRepository {
           },
         ],
       },
+      _sum: {
+        quantity: true,
+      },
     });
+
+    return aggregate._sum.quantity || 0;
   }
 
   /**
@@ -80,7 +90,12 @@ export class BookingRepository {
       userId: string;
       startTime: Date;
       endTime: Date;
+      quantity?: number;
       totalAmount: number | Prisma.Decimal;
+      cashDue?: number | Prisma.Decimal;
+      coinsRedeemed?: number | Prisma.Decimal;
+      coinTenderAmount?: number | Prisma.Decimal;
+      conversionRateSnapshot?: number | Prisma.Decimal;
       originalAmount?: number | Prisma.Decimal;
       discountAmount?: number | Prisma.Decimal;
       discountId?: string;
@@ -97,8 +112,13 @@ export class BookingRepository {
         startTime: data.startTime,
         endTime: data.endTime,
         state: BookingState.HELD,
+        quantity: data.quantity ?? 1,
         holdExpiresAt: data.holdExpiresAt,
         totalAmount: data.totalAmount,
+        cashDue: data.cashDue ?? data.totalAmount,
+        coinsRedeemed: data.coinsRedeemed ?? 0,
+        coinTenderAmount: data.coinTenderAmount ?? 0,
+        conversionRateSnapshot: data.conversionRateSnapshot,
         originalAmount: data.originalAmount,
         discountAmount: data.discountAmount ?? 0,
         discountId: data.discountId,
@@ -360,16 +380,72 @@ export class BookingRepository {
    * Bulk updates all overdue HELD / PENDING_PAYMENT bookings to EXPIRED
    */
   async sweepOverdueHolds(now: Date = new Date()): Promise<number> {
-    const result = await prisma.booking.updateMany({
+    const overdueBookings = await prisma.booking.findMany({
       where: {
         state: { in: [BookingState.HELD, BookingState.PENDING_PAYMENT] },
         holdExpiresAt: { lte: now },
       },
-      data: {
-        state: BookingState.EXPIRED,
-      },
+      select: { id: true },
     });
-    return result.count;
+
+    let count = 0;
+    for (const b of overdueBookings) {
+      try {
+        await prisma.$transaction(
+          async (tx) => {
+            // 1. Lock pending transactions
+            await tx.$queryRaw`
+              SELECT id FROM "transactions" WHERE "bookingId" = ${b.id} AND "status" = 'PENDING' FOR UPDATE
+            `;
+
+            // 2. Lock booking
+            const rows = await tx.$queryRaw<
+              Array<{ id: string; state: string }>
+            >`
+              SELECT id, state FROM "bookings" WHERE id = ${b.id} FOR UPDATE
+            `;
+            if (
+              rows.length === 0 ||
+              !["HELD", "PENDING_PAYMENT"].includes(rows[0].state)
+            ) {
+              return;
+            }
+
+            // 3. Lock active coin hold
+            await tx.$queryRaw`
+              SELECT id FROM "coin_holds" WHERE "bookingId" = ${b.id} AND "status" = 'ACTIVE' FOR UPDATE
+            `;
+
+            // Update transactions: PENDING -> EXPIRED
+            await tx.transaction.updateMany({
+              where: { bookingId: b.id, status: PaymentStatus.PENDING },
+              data: { status: PaymentStatus.EXPIRED },
+            });
+
+            // Update booking: state -> EXPIRED
+            await tx.booking.update({
+              where: { id: b.id },
+              data: { state: BookingState.EXPIRED },
+            });
+
+            // Update coin hold: ACTIVE -> RELEASED
+            await tx.coinHold.updateMany({
+              where: { bookingId: b.id, status: HoldStatus.ACTIVE },
+              data: { status: HoldStatus.RELEASED },
+            });
+
+            count++;
+          },
+          { timeout: 15000, maxWait: 10000 },
+        );
+      } catch (err: any) {
+        console.warn(
+          `Error sweeping overdue hold for booking ${b.id}:`,
+          err?.message,
+        );
+      }
+    }
+    return count;
   }
 
   /**
