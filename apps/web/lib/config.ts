@@ -11,6 +11,13 @@ export const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 /**
+ * Legal pages live in the customer portal, which renders the policy documents
+ * managed in the admin portal. next.config.mjs redirects /privacy and /terms here.
+ */
+export const PRIVACY_POLICY_URL = `${CUSTOMER_PORTAL_URL}/privacy`;
+export const TERMS_OF_SERVICE_URL = `${CUSTOMER_PORTAL_URL}/terms`;
+
+/**
  * Returns the customer portal login URL with optional post-auth return destination.
  */
 export function getPortalLoginUrl(redirectTo?: string): string {

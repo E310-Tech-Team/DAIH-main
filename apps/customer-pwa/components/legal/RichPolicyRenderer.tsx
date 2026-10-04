@@ -52,20 +52,14 @@ export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
   content,
   className = "",
 }) => {
-  if (!content) {
-    return (
-      <p className="text-slate-400 text-xs italic">
-        No document content provided.
-      </p>
-    );
-  }
-
   // If content contains HTML tags from the visual WYSIWYG editor, render safely with DOMPurify
   const isHtml =
     /<\/?(h[1-6]|p|div|ul|ol|li|blockquote|table|strong|em|u|del|a|hr|br)[^>]*>/i.test(
       content,
     );
 
+  // Kept above the empty-content return so the hook order is stable when
+  // content arrives after the first render.
   const cleanHtml = useMemo(() => {
     if (!isHtml) return "";
     if (typeof window !== "undefined") {
@@ -73,6 +67,14 @@ export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
     }
     return content;
   }, [content, isHtml]);
+
+  if (!content) {
+    return (
+      <p className="text-slate-400 text-xs italic">
+        No document content provided.
+      </p>
+    );
+  }
 
   if (isHtml) {
     return (
@@ -329,6 +331,7 @@ export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
 
       // Table: lines containing |
       if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+        const tableStart = i;
         const tableLines: string[] = [];
         while (
           i < lines.length &&
@@ -385,6 +388,9 @@ export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
           );
           continue;
         }
+
+        // A lone pipe row is not a table: rewind so it renders as text below.
+        i = tableStart;
       }
 
       // Regular Paragraph
@@ -399,20 +405,32 @@ export const RichPolicyRenderer: React.FC<RichPolicyRendererProps> = ({
         !lines[i].trim().startsWith("|") &&
         !/^(\-{3,}|\*{3,})$/.test(lines[i].trim())
       ) {
-        paragraphLines.push(lines[i].trim());
+        paragraphLines.push(lines[i]);
         i++;
       }
 
-      if (paragraphLines.length > 0) {
-        blocks.push(
-          <p
-            key={`p-${i}`}
-            className="my-2.5 text-xs sm:text-sm text-slate-700 leading-relaxed"
-          >
-            {renderInline(paragraphLines.join(" "))}
-          </p>,
-        );
+      // A line no rule above claims (e.g. "#### Heading", or "| a | b" without
+      // a closing pipe) would otherwise never advance `i` and hang the page.
+      if (paragraphLines.length === 0) {
+        paragraphLines.push(lines[i]);
+        i++;
       }
+
+      blocks.push(
+        <p
+          key={`p-${i}`}
+          className="my-2.5 text-xs sm:text-sm text-slate-700 leading-relaxed"
+        >
+          {paragraphLines.map((pLine, pIdx) => (
+            <React.Fragment key={pIdx}>
+              {/* Two or more trailing spaces is a Markdown hard line break */}
+              {pIdx > 0 &&
+                (/ {2,}$/.test(paragraphLines[pIdx - 1]) ? <br /> : " ")}
+              {renderInline(pLine.trim())}
+            </React.Fragment>
+          ))}
+        </p>,
+      );
     }
 
     return blocks;

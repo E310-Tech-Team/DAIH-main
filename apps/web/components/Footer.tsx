@@ -1,5 +1,6 @@
 import React from "react";
 import Link from "next/link";
+import { PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from "../lib/config";
 
 export const Footer = () => {
   return (
@@ -128,12 +129,13 @@ export const Footer = () => {
                         &copy; Copyright 2026 - The Dare Adeboye Innovation Hub
                       </span>
                     </Link>
-                    {/* Required on the home page for Google OAuth brand verification. */}
+                    {/* Required on the home page for Google OAuth brand verification.
+                        Link straight to the portal URLs entered in Google's Branding page. */}
                     <span className="copy">
                       {" · "}
-                      <Link href="/privacy">Privacy Policy</Link>
+                      <a href={PRIVACY_POLICY_URL}>Privacy Policy</a>
                       {" · "}
-                      <Link href="/terms">Terms of Service</Link>
+                      <a href={TERMS_OF_SERVICE_URL}>Terms of Service</a>
                     </span>
                   </div>
                   <div className="de-flex-col">
