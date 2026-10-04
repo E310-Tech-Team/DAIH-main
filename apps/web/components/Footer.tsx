@@ -128,6 +128,13 @@ export const Footer = () => {
                         &copy; Copyright 2026 - The Dare Adeboye Innovation Hub
                       </span>
                     </Link>
+                    {/* Required on the home page for Google OAuth brand verification. */}
+                    <span className="copy">
+                      {" · "}
+                      <Link href="/privacy">Privacy Policy</Link>
+                      {" · "}
+                      <Link href="/terms">Terms of Service</Link>
+                    </span>
                   </div>
                   <div className="de-flex-col">
                     <div className="social-icons">
