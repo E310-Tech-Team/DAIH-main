@@ -987,7 +987,30 @@ Schema changes ship as Prisma migrations; CI and the production deploy both run 
 - **Validation.** Request bodies, queries and params are validated with Zod schemas (`validateBody`/`validateQuery`/`validateParams`).
 - **OpenAPI.** `/api-docs` and `/api/v1/docs` serve the Swagger UI and `…/openapi.json`; both are public.
 
-> **In progress** — authentication conventions (token transport and lifetimes, refresh rotation, MFA) are being generated from the code and will be added to this PR before it is merged.
+- **Responses.** Success bodies are `{ success: true, data, … }`. Errors are `{ success: false, code, message }`, with `400 VALIDATION_ERROR` for invalid input; unexpected server errors return a generic message.
+
+**Authentication**
+
+| Mechanism     | Behaviour                                                                                                                                                                                                                                                                                                       |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Access token  | HS256 JWT, 15 minutes, sent as `Authorization: Bearer <token>`. Every request also checks that the session has not been revoked (Redis → 5-second in-process cache → database) and that the user is not deactivated.                                                                                            |
+| Refresh token | Opaque random value stored hashed; travels only in the HttpOnly cookie `daih_refresh_token` (path `/api/v1/identity`, `SameSite=Lax`, `Secure` in production, 7 days). `POST /identity/refresh` rotates it within a token family; reusing an old token after a 15-second grace window revokes the whole family. |
+| Staff MFA     | Required for every staff role. Login returns a 5-minute `mfaChallengeToken` (or a 15-minute `setupToken` if MFA is not enrolled) instead of a session. Factors: a 6-digit email code (valid 10 minutes) or an authenticator app (TOTP).                                                                         |
+| Google        | ID-token sign-in (`POST /identity/auth/google`), or the redirect flow with PKCE (`GET /identity/oauth/google` → callback → `POST /identity/oauth/exchange` with a one-time code).                                                                                                                               |
+| Email links   | Verification links last 24 hours; password-reset links last 1 hour and revoke every session when used.                                                                                                                                                                                                          |
+
+**Rate limits** (Redis-backed; defaults from `.env`):
+
+| Limiter                         | Applies to                                  | Default                                           |
+| ------------------------------- | ------------------------------------------- | ------------------------------------------------- |
+| `loginRateLimiter`              | Login, Google sign-in, MFA verify           | 5 per 15 min per account and 20 per 15 min per IP |
+| `registrationRateLimiter`       | Register, onboarding attribution            | 10 per hour per IP                                |
+| `verificationResendRateLimiter` | Resend verification, resend MFA code        | 3 per hour                                        |
+| `passwordResetRateLimiter`      | Password-reset request, staff account setup | 3 per hour                                        |
+| `refreshRateLimiter`            | Token refresh                               | 30 per 15 min per IP                              |
+| `oauthExchangeRateLimiter`      | OAuth code exchange                         | 10 per minute per IP                              |
+
+Other endpoints have no rate limit. **Payments:** the Paystack webhook is verified with `PAYSTACK_SECRET_KEY` (HMAC-SHA512 of the raw body), and every `charge.success` is re-checked with Paystack's verify API before a booking is confirmed.
 
 ### 7.2 Roles and permissions
 

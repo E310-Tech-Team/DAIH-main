@@ -120,16 +120,16 @@ DAIH presents as a calm, premium workspace brand: deep purple, generous white sp
 
 ### 5.1 Shared library (`packages/ui`)
 
-| Component               | API                                                                                        | Used by                              | Gaps                                                                                           |
-| ----------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `Button`                | `primary`, `secondary`, `outline`, `ghost`, `danger`, `amber`; `sm`/`md`/`lg`; `isLoading` | Admin (settings, reports, resources) | Primary is navy; admin overrides it with `bg-[#23055c]`, leaving a navy focus ring             |
-| `Card`                  | `hoverEffect`                                                                              | Admin (once)                         | —                                                                                              |
-| `Badge` / `StatusBadge` | 6 variants; booking-state mapping                                                          | **No app**                           | Unused                                                                                         |
-| `Input`                 | `label`, `error`, `helperText`                                                             | Admin                                | Label linked via `htmlFor`; no `aria-invalid`/`aria-describedby`                               |
-| `Modal`                 | `isOpen`, `onClose`, `title`                                                               | Admin (7 files)                      | Portal, Escape and scroll-lock work; no `role="dialog"`, `aria-modal` or focus trap            |
-| `QRDisplay`             | `token`, `customerName`, `bookingRef`, `validUntil`                                        | Member app                           | Image comes from `api.qrserver.com`: fails offline and sends the access token to a third party |
-| `Toast`                 | `ToastProvider`, `useToast` (success/error/warning/info, 4.5 s, 1.5 s de-dupe)             | Member app, admin                    | Reception mounts the provider but uses `alert()` instead                                       |
-| `cn`                    | `clsx` + `tailwind-merge`                                                                  | Admin                                | —                                                                                              |
+| Component               | API                                                                                        | Used by                              | Gaps                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------- |
+| `Button`                | `primary`, `secondary`, `outline`, `ghost`, `danger`, `amber`; `sm`/`md`/`lg`; `isLoading` | Admin (settings, reports, resources) | Primary is navy; admin overrides it with `bg-[#23055c]`, leaving a navy focus ring  |
+| `Card`                  | `hoverEffect`                                                                              | Admin (once)                         | —                                                                                   |
+| `Badge` / `StatusBadge` | 6 variants; booking-state mapping                                                          | **No app**                           | Unused                                                                              |
+| `Input`                 | `label`, `error`, `helperText`                                                             | Admin                                | Label linked via `htmlFor`; no `aria-invalid`/`aria-describedby`                    |
+| `Modal`                 | `isOpen`, `onClose`, `title`                                                               | Admin (7 files)                      | Portal, Escape and scroll-lock work; no `role="dialog"`, `aria-modal` or focus trap |
+| `QRDisplay`             | `token`, `customerName`, `bookingRef`, `validUntil`                                        | Member app                           | QR rendered on the device with `qrcode` (no third-party service)                    |
+| `Toast`                 | `ToastProvider`, `useToast` (success/error/warning/info, 4.5 s, 1.5 s de-dupe)             | Member app, admin                    | Reception mounts the provider but uses `alert()` instead                            |
+| `cn`                    | `clsx` + `tailwind-merge`                                                                  | Admin                                | —                                                                                   |
 
 ### 5.2 Patterns built inside the apps
 
@@ -147,7 +147,6 @@ DAIH presents as a calm, premium workspace brand: deep purple, generous white sp
 
 - Promote `Table`, `Skeleton`, `EmptyState`, `Select`, `DatePicker` and an accessible `Dialog` into `packages/ui`.
 - Fix `Button` to use the primary token.
-- Render QR codes locally (for example with the `qrcode` package), which is both an offline fix and a security fix.
 
 ## 6. Layout conventions
 
