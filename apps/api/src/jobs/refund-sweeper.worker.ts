@@ -55,6 +55,12 @@ export class RefundSweeperWorker {
           SELECT id, attempts
           FROM "refund_requests"
           WHERE "isSystemInitiated" = true AND status = 'PENDING'
+            -- Bank transfer, cash and POS refunds are paid out by finance, not Paystack.
+            AND NOT EXISTS (
+              SELECT 1 FROM "transactions" t
+              WHERE t.id = "refund_requests"."transactionId"
+                AND t.method IN ('BANK_TRANSFER', 'CASH', 'POS_TERMINAL')
+            )
           ORDER BY "createdAt" ASC
           LIMIT ${batchSize}
           FOR UPDATE SKIP LOCKED

@@ -16,6 +16,7 @@ import {
 import { assertValidTransition } from "../booking/booking.state-machine.js";
 import { prisma } from "../../db/client.js";
 import { outboxService } from "../events/outbox.service.js";
+import { paymentSettingsService } from "../payments/payment-settings.service.js";
 
 export class AccessService {
   constructor(private repo: AccessRepository = accessRepository) {}
@@ -496,15 +497,33 @@ export class AccessService {
         BookingState.PENDING_PAYMENT,
       ].includes(booking.state as BookingState)
     ) {
+      const settings = await paymentSettingsService.getValues();
+      const cashDue = Number(booking.cashDue ?? 0);
+      const holdLive =
+        booking.holdExpiresAt !== null &&
+        new Date(booking.holdExpiresAt).getTime() > now.getTime();
+      // Mirrors what POST /payments/reception/:bookingId will accept.
+      const canRecordPayment =
+        settings.payAtReceptionEnabled &&
+        cashDue > 0 &&
+        holdLive &&
+        booking.state !== BookingState.DRAFT;
       return {
         valid: false,
         rejectionReason: AccessRejectionReason.UNPAID,
         rejectionTitle: "Payment Required / Unpaid Booking",
-        rejectionMessage:
-          "This booking has not been confirmed. Digital access passes are issued only after payment confirmation.",
+        rejectionMessage: canRecordPayment
+          ? "This booking has not been paid yet. Collect payment at the desk to confirm it, then check the member in."
+          : "This booking has not been confirmed. Digital access passes are issued only after payment confirmation.",
         booking: passDetails,
         canCheckIn: false,
         canCheckOut: false,
+        paymentDue: {
+          amount: cashDue,
+          currency: booking.currency || "NGN",
+          paymentOption: booking.paymentOption ?? null,
+          canRecordPayment,
+        },
       };
     }
 

@@ -11,6 +11,8 @@ import { paystackClient } from "./paystack.client.js";
 import { enqueueNotification } from "../notifications/notifications.queue.js";
 import { outboxService } from "../events/outbox.service.js";
 import { Decimal } from "@prisma/client/runtime/library";
+import { MANUAL_PAYMENT_METHODS } from "./payment-options.js";
+import { paymentError } from "./payment-errors.js";
 
 export interface RaiseRefundRequestDTO {
   bookingId: string;
@@ -370,16 +372,22 @@ export class RefundService {
    * Finance Officer or Super Admin approves the refund request.
    * Executes 3-Stage Atomic Claim, Paystack gateway execution, and reason-code scoped finalization.
    */
+  /**
+   * Finance approves a refund. Card refunds go back through Paystack; bank
+   * transfer, cash and POS refunds are paid out by hand, so those need
+   * `payoutReference` (the outgoing transfer reference or cash receipt number).
+   */
   async approveRefund(
     financeOfficerUserId: string,
     refundRequestId: string,
-    workerId: string = "manual-finance-officer",
+    options: { payoutReference?: string; workerId?: string } = {},
   ): Promise<any> {
     return this.executeRefund(
       refundRequestId,
       financeOfficerUserId,
-      workerId,
+      options.workerId ?? "manual-finance-officer",
       false,
+      options.payoutReference,
     );
   }
 
@@ -406,6 +414,7 @@ export class RefundService {
     approvingUserId: string,
     workerId: string,
     isSystem: boolean,
+    payoutReference?: string,
   ): Promise<any> {
     const refund = await prisma.refundRequest.findUnique({
       where: { id: refundRequestId },
@@ -447,6 +456,26 @@ export class RefundService {
       error.code = "INVALID_REFUND_STATUS";
       error.statusCode = 400;
       throw error;
+    }
+
+    // Bank transfer, cash and POS payments never went through Paystack:
+    // finance returns the money by hand and records how.
+    const isManualPayout =
+      !!refund.transaction &&
+      MANUAL_PAYMENT_METHODS.has(refund.transaction.method);
+    if (isManualPayout && isSystem) {
+      throw paymentError(
+        409,
+        "MANUAL_PAYOUT_REQUIRED",
+        "This refund must be paid out by finance.",
+      );
+    }
+    if (isManualPayout && !payoutReference) {
+      throw paymentError(
+        400,
+        "PAYOUT_REFERENCE_REQUIRED",
+        "Pay the member back first, then enter the transfer reference or cash receipt number.",
+      );
     }
 
     // Stage 1: Atomic Claim with Global Lock Order
@@ -492,7 +521,7 @@ export class RefundService {
       ] as RefundReasonCode[]
     ).includes(refund.reasonCode);
 
-    if (!isZeroCash) {
+    if (!isZeroCash && !isManualPayout) {
       const txRef =
         refund.transaction?.paystackReference ||
         refund.transaction?.reference ||
@@ -571,8 +600,12 @@ export class RefundService {
             status: RefundStatus.PROCESSED,
             reviewedByUserId: isSystem ? null : approvingUserId,
             reviewedAt: new Date(),
-            paystackRefundId: String(paystackResult?.data?.id || ""),
-            gatewayReference: paystackResult?.data?.refund_reference || null,
+            paystackRefundId: isManualPayout
+              ? null
+              : String(paystackResult?.data?.id || ""),
+            gatewayReference: isManualPayout
+              ? (payoutReference ?? null)
+              : paystackResult?.data?.refund_reference || null,
           },
           include: {
             booking: { include: { user: true } },
@@ -590,6 +623,23 @@ export class RefundService {
               refundedAt: new Date(),
               refundAmount: refund.amount,
               refundedBy: approvingUserId,
+            },
+          });
+        }
+
+        if (isManualPayout) {
+          await tx.auditLog.create({
+            data: {
+              userId: approvingUserId,
+              action: "REFUND_PAID_OUT_MANUALLY",
+              entityType: "RefundRequest",
+              entityId: refundRequestId,
+              metadata: {
+                transactionId: refund.transactionId,
+                method: refund.transaction?.method ?? null,
+                amount: Number(refund.amount),
+                payoutReference: payoutReference ?? null,
+              },
             },
           });
         }

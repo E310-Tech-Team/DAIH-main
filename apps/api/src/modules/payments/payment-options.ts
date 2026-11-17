@@ -1,8 +1,16 @@
 import {
   AvailablePaymentOption,
   BankAccountDetails,
+  PaymentMethod,
   PaymentOption,
 } from "@daih/types";
+
+/** Payments recorded by staff rather than a gateway: they are refunded by hand. */
+export const MANUAL_PAYMENT_METHODS: ReadonlySet<string> = new Set<string>([
+  PaymentMethod.BANK_TRANSFER,
+  PaymentMethod.CASH,
+  PaymentMethod.POS_TERMINAL,
+]);
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;

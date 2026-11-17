@@ -3,9 +3,15 @@ import { sanitizeString } from "../../middleware/validate.middleware.js";
 import {
   PaymentStatus,
   PaymentMethod,
+  PaymentOption,
   RefundStatus,
   RefundReasonCode,
 } from "@daih/types";
+import {
+  NUBAN_PATTERN,
+  RECEPTION_GRACE_MINUTES,
+  TRANSFER_WINDOW_HOURS,
+} from "./payment-options.js";
 
 export const InitializePaymentParamsSchema = z.object({
   bookingId: z
@@ -17,7 +23,101 @@ export const InitializePaymentParamsSchema = z.object({
 
 export const InitializePaymentBodySchema = z.object({
   callbackUrl: z.string().url("Invalid callback URL").optional(),
+  /** Defaults to Paystack so existing clients keep working. */
+  option: z.nativeEnum(PaymentOption).optional(),
 });
+
+/** Naira with at most 2 decimal places (kobo precision). */
+const nairaAmount = z
+  .number({ invalid_type_error: "Amount must be a number" })
+  .positive("Amount must be greater than zero")
+  .max(100_000_000, "Amount is too large")
+  .multipleOf(0.01, "Amount can have at most 2 decimal places");
+
+const optionalText = (max: number) =>
+  z.string().trim().max(max).nullable().optional();
+
+export const UpdatePaymentSettingsSchema = z
+  .object({
+    paystackEnabled: z.boolean().optional(),
+    bankTransferEnabled: z.boolean().optional(),
+    payAtReceptionEnabled: z.boolean().optional(),
+    bankName: optionalText(100),
+    bankAccountNumber: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || NUBAN_PATTERN.test(value),
+        "The account number must be exactly 10 digits",
+      )
+      .nullable()
+      .optional(),
+    bankAccountName: optionalText(100),
+    transferWindowHours: z
+      .number()
+      .int()
+      .min(TRANSFER_WINDOW_HOURS.min)
+      .max(TRANSFER_WINDOW_HOURS.max)
+      .optional(),
+    receptionGraceMinutes: z
+      .number()
+      .int()
+      .min(RECEPTION_GRACE_MINUTES.min)
+      .max(RECEPTION_GRACE_MINUTES.max)
+      .optional(),
+  })
+  .strict();
+
+export const BankTransferListQuerySchema = z.object({
+  status: z
+    .enum([
+      PaymentStatus.PENDING,
+      PaymentStatus.EXPIRED,
+      PaymentStatus.ABANDONED,
+      PaymentStatus.FAILED,
+    ])
+    .default(PaymentStatus.PENDING),
+});
+
+export const ConfirmBankTransferBodySchema = z.object({
+  amountReceived: nairaAmount,
+  bankReference: z
+    .string()
+    .trim()
+    .min(4, "Enter the bank's reference for this transfer")
+    .max(100),
+  note: z.string().trim().max(500).optional(),
+});
+
+export const RejectBankTransferBodySchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(5, "Reason must be at least 5 characters")
+    .max(500),
+});
+
+export const RecordReceptionPaymentBodySchema = z
+  .object({
+    method: z.enum([PaymentMethod.CASH, PaymentMethod.POS_TERMINAL]),
+    amountReceived: nairaAmount,
+    receiptReference: z.string().trim().min(3).max(100).optional(),
+  })
+  .refine(
+    (body) =>
+      body.method !== PaymentMethod.POS_TERMINAL || !!body.receiptReference,
+    {
+      message: "Enter the POS receipt number",
+      path: ["receiptReference"],
+    },
+  );
+
+export const ApproveRefundBodySchema = z
+  .object({
+    /** Required for bank transfer, cash and POS refunds, which finance pays out by hand. */
+    payoutReference: z.string().trim().min(3).max(100).optional(),
+  })
+  .default({});
 
 export const TransactionIdParamsSchema = z.object({
   transactionId: z

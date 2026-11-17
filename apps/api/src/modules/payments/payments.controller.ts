@@ -3,7 +3,9 @@ import { AuthRequest } from "../../middleware/auth.middleware.js";
 import { paymentsService, PaymentsService } from "./payments.service.js";
 import { invoiceService, InvoiceService } from "./invoice.service.js";
 import { refundService, RefundService } from "./refund.service.js";
+import { manualPaymentsService } from "./manual-payments.service.js";
 import { prisma } from "../../db/client.js";
+import { PaymentOption } from "@daih/types";
 
 export function getWebhookDedupKey(event: any): string {
   if (!event) return `event_${Date.now()}`;
@@ -31,7 +33,7 @@ export class PaymentsController {
   initialize = async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const bookingId = req.params.bookingId as string;
-      const { callbackUrl } = req.body || {};
+      const { callbackUrl, option } = req.body || {};
       const userId = req.user?.id;
 
       if (!userId) {
@@ -42,11 +44,16 @@ export class PaymentsController {
         });
       }
 
-      const result = await this.service.initializePayment(
-        bookingId,
-        userId,
-        callbackUrl,
-      );
+      const result =
+        option === PaymentOption.BANK_TRANSFER
+          ? await manualPaymentsService.startBankTransfer(bookingId, userId)
+          : option === PaymentOption.PAY_AT_RECEPTION
+            ? await manualPaymentsService.startPayAtReception(bookingId, userId)
+            : await this.service.initializePayment(
+                bookingId,
+                userId,
+                callbackUrl,
+              );
       res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);
@@ -407,7 +414,9 @@ export class PaymentsController {
         });
       }
       const id = req.params.id as string;
-      const result = await this.refunds.approveRefund(userId, id);
+      const result = await this.refunds.approveRefund(userId, id, {
+        payoutReference: req.body?.payoutReference,
+      });
       res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);

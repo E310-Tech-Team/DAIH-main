@@ -32,6 +32,17 @@ export async function scheduleHoldExpiry(
   if (!holdExpiryQueue || config.env === "test") return;
   try {
     const jobId = `hold_expiry_${bookingId}`;
+    // BullMQ ignores add() while a job with the same id is still pending, so
+    // an extended hold would keep its original timer. Replace it instead.
+    const existing = await holdExpiryQueue.getJob(jobId);
+    if (existing) {
+      await existing.remove().catch((err: unknown) => {
+        console.warn(
+          `Could not replace hold-expiry job for booking '${bookingId}':`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }
     await holdExpiryQueue.add(
       "expire-hold",
       { bookingId },
