@@ -45,12 +45,20 @@ Recent changes on `master`:
 
 ### Payment options program (decided 2026-11-17)
 
-| Phase | Scope                                                                                                                                                                                   | Status                           |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| 1     | Provider-neutral checkout choice; bank transfer confirmed by finance; pay at reception (cash/POS on the kiosk); payment settings; manual refunds with payout references; hold-timer fix | Built — PR open                  |
-| 2     | Monnify automatic bank transfer (one account number per payment)                                                                                                                        | Planned — needs Monnify keys     |
-| 3     | Flutterwave card checkout                                                                                                                                                               | Planned — needs Flutterwave keys |
-| 4     | Real walk-in passes replacing the admin dashboard's "Issue Pass" mock                                                                                                                   | Planned                          |
+| Phase | Scope                                                                                                                                                                                                              | Status                                          |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| 1     | Provider-neutral checkout choice; bank transfer confirmed by finance; pay at reception (cash/POS on the kiosk); payment settings; manual refunds with payout references; hold-timer fix; security-review hardening | Built (API, member app, admin, kiosk) — PR open |
+| 2     | Monnify automatic bank transfer (one account number per payment)                                                                                                                                                   | Planned — needs Monnify keys                    |
+| 3     | Flutterwave card checkout                                                                                                                                                                                          | Planned — needs Flutterwave keys                |
+| 4     | Real walk-in passes replacing the admin dashboard's "Issue Pass" mock                                                                                                                                              | Planned                                         |
+
+Follow-ups from the phase 1 security review and build:
+
+- A second super admin should approve bank-account changes (today one super admin can change it; every change is emailed and audit-logged).
+- Rate limits and anomaly alerts on the staff payment endpoints (confirm, reject, reception).
+- Applying coins (`/loyalty/apply-redemption`) lowers `totalAmount` but not `cashDue`, so the member is charged the full amount — fix with the PeeDee decisions in §4.
+- The admin `/settings` page's mock "Paystack Gateway Configuration" section is misleading now that **Settings → Payment methods** exists; remove it with the rest of that mock form.
+- Kiosk: the check-in/check-out banners are cleared right after they are set (pre-existing).
 
 ## 3. Operational readiness
 
