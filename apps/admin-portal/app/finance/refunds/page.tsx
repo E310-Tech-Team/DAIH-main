@@ -180,7 +180,7 @@ export default function RefundsAdminPage() {
             ₦{kpis.totalDisbursedNgn.toLocaleString()}
           </div>
           <div className="text-[11px] text-emerald-600 font-semibold mt-1">
-            Via Paystack Gateway
+            Paystack & manual payouts
           </div>
         </div>
 
@@ -218,10 +218,14 @@ export default function RefundsAdminPage() {
         onSelectRefund={handleSelectRefund}
       />
 
-      {/* Detail Inspector Modal */}
+      {/* Detail Inspector Modal: keyed so each opened refund starts with a fresh form */}
       <RefundDetailModal
+        key={selectedRefund?.id ?? "none"}
         isOpen={detailModalOpen}
-        onClose={() => setDetailModalOpen(false)}
+        onClose={() => {
+          setDetailModalOpen(false);
+          setSelectedRefund(null);
+        }}
         refund={selectedRefund}
         onUpdated={fetchRefunds}
       />

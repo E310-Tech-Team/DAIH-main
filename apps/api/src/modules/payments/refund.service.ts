@@ -865,6 +865,18 @@ export class RefundService {
   }
 
   /**
+   * Replaces the included `transaction` with just its method
+   * (`transactionMethod`): bank transfer, cash and POS refunds are paid back by
+   * hand, so the approve screen must ask for a payout reference.
+   */
+  private withTransactionMethod<
+    T extends { transaction: { method: string } | null },
+  >(row: T): Omit<T, "transaction"> & { transactionMethod: string | null } {
+    const { transaction, ...rest } = row;
+    return { ...rest, transactionMethod: transaction?.method ?? null };
+  }
+
+  /**
    * Lists refund requests with optional status filter and pagination.
    */
   async listRefundRequests(filters: {
@@ -923,6 +935,7 @@ export class RefundService {
               role: true,
             },
           },
+          transaction: { select: { method: true } },
         },
         orderBy: { requestedAt: "desc" },
         skip,
@@ -932,7 +945,7 @@ export class RefundService {
     ]);
 
     return {
-      items,
+      items: items.map((item) => this.withTransactionMethod(item)),
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -977,6 +990,7 @@ export class RefundService {
             role: true,
           },
         },
+        transaction: { select: { method: true } },
       },
     });
 
@@ -987,7 +1001,7 @@ export class RefundService {
       throw error;
     }
 
-    return request;
+    return this.withTransactionMethod(request);
   }
 }
 

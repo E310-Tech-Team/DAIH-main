@@ -327,6 +327,11 @@ export interface RefundRequestItemDTO {
   id: string;
   bookingId: string;
   transactionId?: string | null;
+  /**
+   * How the refunded payment was made. Bank transfer, cash and POS refunds are
+   * paid back by hand, so approving one needs a payout reference.
+   */
+  transactionMethod?: PaymentMethod | null;
   amount: number;
   coinsToReverse: number;
   coinsToClawback: number;

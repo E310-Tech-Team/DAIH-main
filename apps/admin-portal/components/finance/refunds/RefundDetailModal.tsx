@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 import {
   X,
   RotateCcw,
@@ -30,6 +30,22 @@ import {
 import { RequestInfoModal } from "./RequestInfoModal";
 import { ProvideInfoModal } from "./ProvideInfoModal";
 import { RejectRefundModal } from "./RejectRefundModal";
+import { FormField, INPUT_CLASS } from "../../common/FormField";
+import { InlineAlert } from "../../common/InlineAlert";
+import { apiErrorCode, apiErrorMessage } from "../../../lib/api-errors";
+import {
+  isManualPaymentMethod,
+  paymentMethodLabel,
+} from "../../../lib/payment-labels";
+import {
+  REFERENCE_INPUT_PATTERN,
+  REFERENCE_MAX_LENGTH,
+  referenceCharacterProblem,
+  validateReference,
+} from "../../../lib/reference-validation";
+
+/** Mirrors the API: a manual payout reference is at least 3 characters. */
+const PAYOUT_REFERENCE_MIN_LENGTH = 3;
 
 export interface RefundDetailModalProps {
   isOpen: boolean;
@@ -50,8 +66,25 @@ export const RefundDetailModal: React.FC<RefundDetailModalProps> = ({
   const [requestInfoOpen, setRequestInfoOpen] = useState(false);
   const [provideInfoOpen, setProvideInfoOpen] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
+  const payoutInputId = useId();
+  const [payoutReference, setPayoutReference] = useState("");
+  const [payoutError, setPayoutError] = useState<string | null>(null);
+  const [approveError, setApproveError] = useState<string | null>(null);
+  // Set if the API asks for a payout reference this screen did not expect.
+  const [isPayoutRequiredByApi, setIsPayoutRequiredByApi] = useState(false);
 
   if (!isOpen || !refund) return null;
+
+  // Bank transfer, cash and POS payments are refunded by hand, so finance
+  // records how the money went back (API: PAYOUT_REFERENCE_REQUIRED).
+  const isManualPayout =
+    isManualPaymentMethod(refund.transactionMethod) || isPayoutRequiredByApi;
+  const paidWithLabel = paymentMethodLabel(refund.transactionMethod);
+  const payoutChannelLabel = isManualPayout
+    ? `Paid back by hand${paidWithLabel ? ` · ${paidWithLabel}` : ""}`
+    : "Via Paystack Gateway";
+  const shownPayoutError =
+    payoutError ?? referenceCharacterProblem(payoutReference);
 
   const isSelf = user?.id === refund.requestedByUserId;
   const isFinanceOrSuperAdmin =
@@ -75,22 +108,46 @@ export const RefundDetailModal: React.FC<RefundDetailModalProps> = ({
 
   const handleApprove = async () => {
     if (isSelf) {
-      toast.error(
+      setApproveError(
         "Segregation of duties: You cannot approve a refund request that you raised.",
       );
       return;
     }
 
+    const trimmedPayoutReference = payoutReference.trim();
+    if (isManualPayout) {
+      const problem = validateReference(payoutReference, {
+        minLength: PAYOUT_REFERENCE_MIN_LENGTH,
+        label: "payout reference",
+      });
+      if (problem) {
+        setPayoutError(problem);
+        document.getElementById(payoutInputId)?.focus();
+        return;
+      }
+    }
+
     setIsApproving(true);
+    setApproveError(null);
     try {
-      await api.payments.approveRefund(refund.id);
+      await api.payments.approveRefund(
+        refund.id,
+        isManualPayout ? trimmedPayoutReference : undefined,
+      );
       toast.success(
-        "Refund approved and disbursed via Paystack! Coins reversed & clawbacks applied.",
+        isManualPayout
+          ? `Refund approved and payout ${trimmedPayoutReference} recorded. Coins reversed & clawbacks applied.`
+          : "Refund approved and disbursed via Paystack! Coins reversed & clawbacks applied.",
       );
       onUpdated?.();
       onClose();
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to approve refund");
+    } catch (err: unknown) {
+      // e.g. SELF_APPROVAL_PROHIBITED (you confirmed this payment) or
+      // DUPLICATE_PAYOUT_REFERENCE: shown in place, in the API's words.
+      if (apiErrorCode(err) === "PAYOUT_REFERENCE_REQUIRED") {
+        setIsPayoutRequiredByApi(true);
+      }
+      setApproveError(apiErrorMessage(err, "Failed to approve refund"));
     } finally {
       setIsApproving(false);
     }
@@ -216,9 +273,9 @@ export const RefundDetailModal: React.FC<RefundDetailModalProps> = ({
               <div className="font-bold text-emerald-600 text-lg">
                 ₦{Number(refund.amount).toLocaleString()}
               </div>
-              <div className="text-slate-500 text-[11px] flex items-center gap-1">
+              <div className="text-slate-600 text-[11px] flex items-center gap-1">
                 <CreditCard className="w-3.5 h-3.5" />
-                <span>Via Paystack Gateway</span>
+                <span>{payoutChannelLabel}</span>
               </div>
             </div>
           </div>
@@ -336,13 +393,68 @@ export const RefundDetailModal: React.FC<RefundDetailModalProps> = ({
             <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3 text-xs space-y-1">
               <span className="font-bold text-emerald-900 flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                Paystack Gateway Settlement
+                {isManualPayout
+                  ? "Manual Payout Recorded"
+                  : "Paystack Gateway Settlement"}
               </span>
               <div className="text-[11px] font-mono text-emerald-800 space-y-0.5">
-                <div>Refund ID: {refund.paystackRefundId || "N/A"}</div>
-                <div>Reference: {refund.gatewayReference || "N/A"}</div>
+                {isManualPayout ? (
+                  <div>
+                    Payout reference: {refund.gatewayReference || "N/A"}
+                  </div>
+                ) : (
+                  <>
+                    <div>Refund ID: {refund.paystackRefundId || "N/A"}</div>
+                    <div>Reference: {refund.gatewayReference || "N/A"}</div>
+                  </>
+                )}
               </div>
             </div>
+          )}
+
+          {/* Manual payout: bank transfer, cash and POS refunds are paid back by hand */}
+          {canApprove && isManualPayout && (
+            <div className="space-y-3 rounded-xl border border-amber-200 bg-amber-50/70 p-4">
+              <p className="text-sm text-slate-800">
+                <strong className="font-bold text-slate-900">
+                  Manual payout.
+                </strong>{" "}
+                {paidWithLabel ? `Original payment: ${paidWithLabel}. ` : ""}
+                Finance pays this refund back by hand.
+              </p>
+              <FormField
+                id={payoutInputId}
+                label="Payout reference"
+                required
+                hint="Pay the member back first, then enter your transfer reference or the cash receipt number"
+                error={shownPayoutError}
+              >
+                {(control) => (
+                  <input
+                    {...control}
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    maxLength={REFERENCE_MAX_LENGTH}
+                    pattern={REFERENCE_INPUT_PATTERN}
+                    value={payoutReference}
+                    onChange={(event) => {
+                      setPayoutReference(event.target.value);
+                      setPayoutError(null);
+                      setApproveError(null);
+                    }}
+                    disabled={isApproving}
+                    className={`${INPUT_CLASS} font-mono`}
+                  />
+                )}
+              </FormField>
+            </div>
+          )}
+
+          {approveError && (
+            <InlineAlert tone="error" role="alert">
+              {approveError}
+            </InlineAlert>
           )}
 
           {/* Bottom Actions */}
@@ -405,7 +517,11 @@ export const RefundDetailModal: React.FC<RefundDetailModalProps> = ({
                   ) : (
                     <CheckCircle2 className="w-4 h-4" />
                   )}
-                  <span>Approve & Disburse</span>
+                  <span>
+                    {isManualPayout
+                      ? "Approve & Record Payout"
+                      : "Approve & Disburse"}
+                  </span>
                 </button>
               )}
             </div>

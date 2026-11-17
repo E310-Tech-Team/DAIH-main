@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@daih/api-client";
 import { Modal } from "@daih/ui";
+import { hasRouteAccess } from "../../lib/rbac";
 
 export interface AdminHeaderProps {
   isMobileOpen: boolean;
@@ -95,6 +96,15 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({
         current: "Refund Approvals",
       };
     }
+    if (
+      path === "/finance/transfers" ||
+      path.startsWith("/finance/transfers/")
+    ) {
+      return {
+        parent: { title: "Finance", href: "/finance" },
+        current: "Bank Transfers",
+      };
+    }
     if (path === "/finance") {
       return { current: "Finance & Payments" };
     }
@@ -140,6 +150,12 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({
         current: "Email Templates",
       };
     }
+    if (path === "/settings/payments") {
+      return {
+        parent: { title: "Settings", href: "/settings" },
+        current: "Payment Methods",
+      };
+    }
     if (path.startsWith("/settings/")) {
       return {
         parent: { title: "Settings", href: "/settings" },
@@ -153,6 +169,12 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({
   };
 
   const breadcrumb = getBreadcrumb(pathname);
+  // Only link to a parent page the signed-in role can open (finance and
+  // management may view Payment Methods but not the Settings home).
+  const breadcrumbParent =
+    breadcrumb.parent && hasRouteAccess(user?.role, breadcrumb.parent.href)
+      ? breadcrumb.parent
+      : undefined;
 
   return (
     <header className="bg-white/95 backdrop-blur-md fixed top-0 w-full z-50 flex justify-between items-center px-4 sm:px-6 lg:px-8 py-3 border-b border-[#EBE7F5] shadow-xs">
@@ -196,13 +218,13 @@ export const AdminHeader: React.FC<AdminHeaderProps> = ({
 
         {/* Current Active Page Breadcrumb / Title */}
         <div className="hidden md:flex items-center gap-2 border-l border-slate-200 pl-4 py-0.5">
-          {breadcrumb.parent ? (
+          {breadcrumbParent ? (
             <>
               <Link
-                href={breadcrumb.parent.href}
+                href={breadcrumbParent.href}
                 className="text-xs font-semibold text-slate-500 hover:text-[#23055c] transition-colors"
               >
-                {breadcrumb.parent.title}
+                {breadcrumbParent.title}
               </Link>
               <span className="text-slate-300">/</span>
               <span className="text-xs font-bold text-slate-800">

@@ -24,6 +24,7 @@ import {
   RotateCcw,
   User,
   Loader2,
+  Landmark,
 } from "lucide-react";
 import { useAuth } from "@daih/api-client";
 import { cn, Modal } from "@daih/ui";
@@ -111,6 +112,12 @@ export const AdminSidebar: React.FC<AdminSidebarProps> = ({
           href: "/finance",
           icon: Receipt,
           description: "Paystack ledger & settlements",
+        },
+        {
+          name: "Bank Transfers",
+          href: "/finance/transfers",
+          icon: Landmark,
+          description: "Confirm against the bank statement",
         },
         {
           name: "Refund Approvals",

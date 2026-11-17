@@ -22,20 +22,25 @@ export interface NavSectionConfig {
 }
 
 /**
+ * Super admins (and the legacy "ADMIN" role) can open every page and do everything.
+ */
+export function isSuperAdminRole(role?: UserRole | string | null): boolean {
+  if (!role) return false;
+  const rawRole = role.toString().toUpperCase();
+  return rawRole === UserRole.SUPER_ADMIN || rawRole === "ADMIN";
+}
+
+/**
  * Returns all permissions associated with a user role.
  */
 export function getUserPermissions(
   role?: UserRole | string | null,
 ): Permission[] {
   if (!role) return [];
-  const rawRole = role.toString().toUpperCase();
-  if (
-    rawRole === "SUPER_ADMIN" ||
-    rawRole === "ADMIN" ||
-    rawRole === UserRole.SUPER_ADMIN
-  ) {
+  if (isSuperAdminRole(role)) {
     return Object.values(Permission);
   }
+  const rawRole = role.toString().toUpperCase();
   const roleKey =
     Object.values(UserRole).find((r) => r.toUpperCase() === rawRole) ||
     (role as UserRole);
@@ -50,12 +55,7 @@ export function hasPermission(
   permission?: Permission | Permission[],
 ): boolean {
   if (!role) return false;
-  const rawRole = role.toString().toUpperCase();
-  if (
-    rawRole === "SUPER_ADMIN" ||
-    rawRole === "ADMIN" ||
-    rawRole === UserRole.SUPER_ADMIN
-  ) {
+  if (isSuperAdminRole(role)) {
     return true;
   }
   if (!permission) return true;
@@ -73,10 +73,7 @@ export function hasRouteAccess(
 ): boolean {
   if (!role) return false;
   const rawRole = role.toString().toUpperCase();
-  const isSuperAdmin =
-    rawRole === "SUPER_ADMIN" ||
-    rawRole === "ADMIN" ||
-    rawRole === UserRole.SUPER_ADMIN;
+  const isSuperAdmin = isSuperAdminRole(role);
 
   if (isSuperAdmin) {
     return true;
@@ -117,6 +114,15 @@ export function hasRouteAccess(
     );
   }
 
+  // Confirming bank transfers against the bank statement is finance's job
+  // (the API requires payments:confirm). Checked before the wider /finance rule.
+  if (pathname.startsWith("/finance/transfers")) {
+    return (
+      rawRole === UserRole.FINANCE_OFFICER ||
+      hasPermission(role, Permission.PAYMENTS_CONFIRM)
+    );
+  }
+
   if (pathname.startsWith("/finance")) {
     return (
       rawRole === UserRole.FINANCE_OFFICER ||
@@ -154,6 +160,18 @@ export function hasRouteAccess(
   // Staff membership & management is strictly restricted to SUPER_ADMIN
   if (pathname.startsWith("/staff") || pathname.startsWith("/users")) {
     return isSuperAdmin || hasPermission(role, Permission.USERS_MANAGE);
+  }
+
+  // Payment methods: viewable by everyone the API lets read payment settings
+  // (payments:read_summary); only a super admin can change them.
+  // Checked before the wider /settings rule.
+  if (pathname.startsWith("/settings/payments")) {
+    return (
+      rawRole === UserRole.OPERATIONS_ADMIN ||
+      rawRole === UserRole.FINANCE_OFFICER ||
+      rawRole === UserRole.MANAGEMENT_VIEWER ||
+      hasPermission(role, Permission.PAYMENTS_READ_SUMMARY)
+    );
   }
 
   if (pathname.startsWith("/settings")) {
