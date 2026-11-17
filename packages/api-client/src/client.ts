@@ -23,6 +23,16 @@ import {
   UploadResourceImageDTO,
   UploadImageResponse,
   PaystackInitializeResponse,
+  InitializePaymentResult,
+  PaymentOption,
+  PaymentOptionsResponse,
+  PaymentSettingsDTO,
+  UpdatePaymentSettingsInput,
+  PendingBankTransfer,
+  ConfirmBankTransferInput,
+  RecordReceptionPaymentInput,
+  ManualPaymentOutcome,
+  PaymentStatus,
   UserProfile,
   UserRole,
   CustomerRecord,
@@ -1077,6 +1087,69 @@ export class DaihApiClient {
       return res;
     },
 
+    /** Starts checkout with the member's chosen option. */
+    startCheckout: async (
+      bookingId: string,
+      option: PaymentOption,
+      callbackUrl?: string,
+    ) => {
+      const res = await this.request<InitializePaymentResult>(
+        `/payments/initialize/${bookingId}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ option, callbackUrl }),
+        },
+      );
+      apiCacheManager.invalidate("my_bookings");
+      apiCacheManager.invalidate("payment_history");
+      return res;
+    },
+
+    /** Payment options the member can choose at checkout. */
+    getOptions: () => this.request<PaymentOptionsResponse>("/payments/options"),
+
+    getSettings: () =>
+      this.request<PaymentSettingsDTO>("/payments/admin/settings"),
+
+    updateSettings: (input: UpdatePaymentSettingsInput) =>
+      this.request<PaymentSettingsDTO>("/payments/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+
+    listBankTransfers: (status?: PaymentStatus) =>
+      this.request<PendingBankTransfer[]>(
+        `/payments/admin/bank-transfers${status ? `?status=${status}` : ""}`,
+      ),
+
+    confirmBankTransfer: (
+      transactionId: string,
+      input: ConfirmBankTransferInput,
+    ) =>
+      this.request<ManualPaymentOutcome>(
+        `/payments/admin/bank-transfers/${transactionId}/confirm`,
+        { method: "POST", body: JSON.stringify(input) },
+      ),
+
+    rejectBankTransfer: (transactionId: string, reason: string) =>
+      this.request<void>(
+        `/payments/admin/bank-transfers/${transactionId}/reject`,
+        { method: "POST", body: JSON.stringify({ reason }) },
+      ),
+
+    /** Reception records cash or POS taken at the desk for an unpaid booking. */
+    recordReceptionPayment: async (
+      bookingId: string,
+      input: RecordReceptionPaymentInput,
+    ) => {
+      const res = await this.request<ManualPaymentOutcome>(
+        `/payments/reception/${bookingId}`,
+        { method: "POST", body: JSON.stringify(input) },
+      );
+      apiCacheManager.invalidate("my_bookings");
+      return res;
+    },
+
     getHistory: (options?: {
       page?: number;
       limit?: number;
@@ -1226,11 +1299,13 @@ export class DaihApiClient {
         },
       ),
 
-    approveRefund: (id: string) =>
+    /** `payoutReference` is required for bank transfer, cash and POS refunds. */
+    approveRefund: (id: string, payoutReference?: string) =>
       this.request<{ success: boolean; data: RefundRequestItemDTO }>(
         `/payments/admin/refunds/${id}/approve`,
         {
           method: "POST",
+          body: JSON.stringify(payoutReference ? { payoutReference } : {}),
         },
       ),
 

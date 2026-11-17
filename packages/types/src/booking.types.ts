@@ -1,4 +1,5 @@
 import { WifiCredentialDTO, WifiAccessStatus } from "./access.types";
+import { PaymentOption } from "./payment.types";
 
 export enum BookingState {
   DRAFT = "DRAFT",
@@ -249,6 +250,10 @@ export interface BookingSummary {
   discountAmount?: number;
   discountCode?: string;
   currency: string;
+  /** What is still to be paid in cash after discounts and coins. */
+  cashDue?: number;
+  /** How the member chose to pay at checkout, if they have chosen. */
+  paymentOption?: PaymentOption | null;
   holdExpiresAt?: string | null;
   checkedInAt?: string | null;
   checkedOutAt?: string | null;

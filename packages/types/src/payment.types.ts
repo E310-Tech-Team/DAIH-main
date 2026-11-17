@@ -125,6 +125,17 @@ export interface RecordReceptionPaymentInput {
   receiptReference?: string;
 }
 
+/** What happened when staff confirmed a transfer or recorded a reception payment. */
+export interface ManualPaymentOutcome {
+  status: PaymentStatus;
+  /** True when the booking is now confirmed and its QR pass issued. */
+  confirmed: boolean;
+  reference: string;
+  message: string;
+  transactionId: string;
+  bookingId: string;
+}
+
 /** A bank transfer waiting for finance to confirm it against the bank statement. */
 export interface PendingBankTransfer {
   transactionId: string;

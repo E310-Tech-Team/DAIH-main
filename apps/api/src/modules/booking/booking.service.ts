@@ -137,6 +137,11 @@ export class BookingService {
         : 0,
       discountCode: booking.discountCode || undefined,
       currency: booking.currency || "NGN",
+      cashDue:
+        booking.cashDue !== undefined && booking.cashDue !== null
+          ? Number(booking.cashDue)
+          : Number(booking.totalAmount),
+      paymentOption: booking.paymentOption ?? null,
       holdExpiresAt: booking.holdExpiresAt
         ? booking.holdExpiresAt instanceof Date
           ? booking.holdExpiresAt.toISOString()
