@@ -284,6 +284,18 @@ sequenceDiagram
 - **Nothing to pay in cash.** Payment initialisation is refused with `ZERO_CASH_DUE`.
 - **Cancelling.** Members can cancel only `HELD` and `PENDING_PAYMENT` bookings. Paid bookings cannot be cancelled; refunds go through staff ([§6.8](#68-refunds)).
 
+#### Choosing how to pay
+
+After reserving, the member picks from the options enabled in **Admin → Settings → Payment methods** (`GET /payments/options`), then `POST /payments/initialize/:bookingId` with `option`:
+
+| Option               | What the member sees                                                                               | How the booking is held                                                                                                                               | How it is confirmed                                                                                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PAYSTACK` (default) | Redirect to Paystack checkout                                                                      | 15 minutes                                                                                                                                            | Webhook or return, re-verified with Paystack                                                                                                                               |
+| `BANK_TRANSFER`      | DAIH's bank details, the amount and a `DAIH-PAY-YYYYMMDD-XXXXXX` reference to put in the narration | Until the transfer window ends (default 24 h), never past the start time; refused if under 30 minutes remain. Re-opening the details never extends it | Finance checks the bank statement and confirms the amount and bank reference on **Finance → Bank transfers**; a different amount is held for reconciliation, not confirmed |
+| `PAY_AT_RECEPTION`   | "Pay ₦X at reception before …"                                                                     | Until the start time plus the grace period (default 30 min)                                                                                           | Reception records cash or POS (with the receipt number) on the kiosk, then checks the member in                                                                            |
+
+Every manual confirmation runs through the same reconciler as card payments, so the QR pass, invoice, coins and emails behave identically. Staff can never confirm a payment for their own booking. Unpaid bookings appear under **Awaiting payment** in My Bookings with their deadline. Refunds of bank-transfer, cash and POS payments are paid back by finance, who must record the payout reference; the automatic refund job skips them.
+
 ### 6.4 Booking states
 
 ```mermaid

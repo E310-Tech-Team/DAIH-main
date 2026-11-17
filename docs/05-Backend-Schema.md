@@ -2,7 +2,7 @@
 
 **Product:** DAIH Workspace Platform
 **Last updated:** 2026-10-04 (generated from the code at `master` 1dc9e9a)
-**Sources of truth:** [`schema.prisma`](../apps/api/src/db/prisma/schema.prisma) (39 models, 24 enums) · [migrations](../apps/api/src/db/prisma/migrations) (12) · [`app.ts`](../apps/api/src/app.ts) and `apps/api/src/modules/*/*.routes.ts` (161 endpoints)
+**Sources of truth:** [`schema.prisma`](../apps/api/src/db/prisma/schema.prisma) (40 models, 25 enums) · [migrations](../apps/api/src/db/prisma/migrations) (13) · [`app.ts`](../apps/api/src/app.ts) and `apps/api/src/modules/*/*.routes.ts` (168 endpoints)
 
 > Companion documents: [01-PRD](01-PRD.md) · [02-TRD](02-TRD.md) · [03-App-Flow](03-App-Flow.md) · [04-UI-UX-Design-Brief](04-UI-UX-Design-Brief.md) · [06-Implementation-Plan](06-Implementation-Plan.md)
 > Request/response examples live in the [Postman collection](DAIH_Postman_Collection.json) and the running API's OpenAPI document (`/api/v1/docs/openapi.json`). When the schema or routes change, update this file in the same PR.
@@ -11,14 +11,14 @@
 
 ## 1. Data model at a glance
 
-One PostgreSQL 16 database, accessed only by the API through Prisma 6.19. The 39 tables fall into nine domains:
+One PostgreSQL 16 database, accessed only by the API through Prisma 6.19. The 40 tables fall into nine domains:
 
 | Domain                       | Tables                                                                                                                                                                |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Identity & security          | `users`, `auth_identities`, `auth_sessions`, `verification_tokens`, `password_reset_tokens`, `mfa_otp_tokens`, `policy_consents`, `client_id_sequences`, `audit_logs` |
 | Catalogue                    | `facility_resources`, `resource_pricing`, `resource_schedules`, `resource_blackouts`                                                                                  |
 | Bookings & visits            | `bookings`, `visit_sessions`                                                                                                                                          |
-| Payments, invoices & refunds | `transactions`, `invoices`, `invoice_sequences`, `refund_requests`, `webhook_events`                                                                                  |
+| Payments, invoices & refunds | `transactions`, `invoices`, `invoice_sequences`, `refund_requests`, `webhook_events`, `payment_settings`                                                              |
 | Discounts                    | `discounts`, `discount_target_resources`, `discount_target_customers`, `discount_redemptions`                                                                         |
 | PeeDee loyalty & referrals   | `loyalty_settings`, `coin_balances`, `coin_ledger_entries`, `coin_holds`, `referral_reward_logs`                                                                      |
 | Campaigns                    | `campaigns`, `campaign_executions`, `campaign_metrics`                                                                                                                |
@@ -104,7 +104,8 @@ erDiagram
 | `BookingState`            | `DRAFT`, `HELD`, `PENDING_PAYMENT`, `CONFIRMED`, `ACTIVE`, `CHECKED_IN`, `CHECKED_OUT`, `COMPLETED`, `CANCELLED`, `EXPIRED`, `NO_SHOW`, `REFUND_PENDING`, `REFUNDED`                                      |
 | `PaymentStatus`           | `PENDING`, `SUCCESSFUL`, `FAILED`, `REFUNDED`, `PARTIALLY_REFUNDED`, `ABANDONED`, `EXPIRED`, `FLAGGED_MISMATCH`, `REQUIRES_RECONCILIATION`                                                                |
 | `TransactionType`         | `PAYMENT`, `REFUND`                                                                                                                                                                                       |
-| `PaymentMethod`           | `PAYSTACK`, `SUBSCRIPTION_CREDIT`, `BANK_TRANSFER`, `POS_TERMINAL`                                                                                                                                        |
+| `PaymentMethod`           | `PAYSTACK`, `SUBSCRIPTION_CREDIT`, `BANK_TRANSFER`, `POS_TERMINAL`, `CASH`                                                                                                                                |
+| `PaymentOption`           | `PAYSTACK`, `BANK_TRANSFER`, `PAY_AT_RECEPTION`                                                                                                                                                           |
 | `OutboxStatus`            | `PENDING`, `PROCESSING`, `PUBLISHED`, `FAILED`, `DEAD_LETTER`                                                                                                                                             |
 | `MfaMethod`               | `EMAIL_OTP`, `TOTP`                                                                                                                                                                                       |
 | `DiscountType`            | `PERCENTAGE`, `FIXED_AMOUNT`, `FIXED_PRICE`                                                                                                                                                               |
@@ -364,35 +365,36 @@ Indexes: `@@index([resourceId, startDate, endDate])`.
 
 #### Booking → `bookings`
 
-| Column                   | Type                  | Constraints                      |
-| ------------------------ | --------------------- | -------------------------------- |
-| `id`                     | `String`              | PK, default `uuid()`             |
-| `reference`              | `String`              | unique                           |
-| `resourceId`             | `String`              |                                  |
-| `userId`                 | `String`              |                                  |
-| `startTime`              | `DateTime`            |                                  |
-| `endTime`                | `DateTime`            |                                  |
-| `state`                  | `BookingState` (enum) | default `DRAFT`                  |
-| `holdExpiresAt`          | `DateTime?`           |                                  |
-| `quantity`               | `Int`                 | default `1`                      |
-| `totalAmount`            | `Decimal`             | db `Decimal(12, 2)`              |
-| `cashDue`                | `Decimal`             | default `0`, db `Decimal(12, 2)` |
-| `coinsRedeemed`          | `Decimal`             | default `0`, db `Decimal(18, 4)` |
-| `coinTenderAmount`       | `Decimal`             | default `0`, db `Decimal(12, 2)` |
-| `conversionRateSnapshot` | `Decimal?`            | db `Decimal(12, 4)`              |
-| `originalAmount`         | `Decimal?`            | db `Decimal(12, 2)`              |
-| `discountAmount`         | `Decimal?`            | default `0`, db `Decimal(12, 2)` |
-| `discountId`             | `String?`             |                                  |
-| `discountCode`           | `String?`             |                                  |
-| `redeemedCoins`          | `Decimal?`            | default `0`, db `Decimal(12, 2)` |
-| `redeemedCoinsNgn`       | `Decimal?`            | default `0`, db `Decimal(12, 2)` |
-| `coinHoldReleased`       | `Boolean?`            | default `false`                  |
-| `currency`               | `String`              | default `"NGN"`                  |
-| `qrToken`                | `String?`             |                                  |
-| `checkedInAt`            | `DateTime?`           |                                  |
-| `checkedOutAt`           | `DateTime?`           |                                  |
-| `createdAt`              | `DateTime`            | default `now()`                  |
-| `updatedAt`              | `DateTime`            | auto-updated                     |
+| Column                   | Type                    | Constraints                      |
+| ------------------------ | ----------------------- | -------------------------------- |
+| `id`                     | `String`                | PK, default `uuid()`             |
+| `reference`              | `String`                | unique                           |
+| `resourceId`             | `String`                |                                  |
+| `userId`                 | `String`                |                                  |
+| `startTime`              | `DateTime`              |                                  |
+| `endTime`                | `DateTime`              |                                  |
+| `state`                  | `BookingState` (enum)   | default `DRAFT`                  |
+| `holdExpiresAt`          | `DateTime?`             |                                  |
+| `quantity`               | `Int`                   | default `1`                      |
+| `totalAmount`            | `Decimal`               | db `Decimal(12, 2)`              |
+| `cashDue`                | `Decimal`               | default `0`, db `Decimal(12, 2)` |
+| `coinsRedeemed`          | `Decimal`               | default `0`, db `Decimal(18, 4)` |
+| `coinTenderAmount`       | `Decimal`               | default `0`, db `Decimal(12, 2)` |
+| `conversionRateSnapshot` | `Decimal?`              | db `Decimal(12, 4)`              |
+| `originalAmount`         | `Decimal?`              | db `Decimal(12, 2)`              |
+| `discountAmount`         | `Decimal?`              | default `0`, db `Decimal(12, 2)` |
+| `discountId`             | `String?`               |                                  |
+| `discountCode`           | `String?`               |                                  |
+| `redeemedCoins`          | `Decimal?`              | default `0`, db `Decimal(12, 2)` |
+| `redeemedCoinsNgn`       | `Decimal?`              | default `0`, db `Decimal(12, 2)` |
+| `coinHoldReleased`       | `Boolean?`              | default `false`                  |
+| `currency`               | `String`                | default `"NGN"`                  |
+| `paymentOption`          | `PaymentOption?` (enum) |                                  |
+| `qrToken`                | `String?`               |                                  |
+| `checkedInAt`            | `DateTime?`             |                                  |
+| `checkedOutAt`           | `DateTime?`             |                                  |
+| `createdAt`              | `DateTime`              | default `now()`                  |
+| `updatedAt`              | `DateTime`              | auto-updated                     |
 
 Relations: `resource` → FacilityResource; `user` → User; `discount` → Discount?; `transactions` → Transaction[]; `visitSessions` → VisitSession[]; `redemptions` → DiscountRedemption[]; `review` → Review?; `coinHold` → CoinHold?; `refundRequests` → RefundRequest[].
 
@@ -430,29 +432,31 @@ Indexes: `@@index([bookingId])`; `@@index([userId])`; `@@index([checkInTime])`.
 
 #### Transaction → `transactions`
 
-| Column              | Type                   | Constraints          |
-| ------------------- | ---------------------- | -------------------- |
-| `id`                | `String`               | PK, default `uuid()` |
-| `reference`         | `String`               | unique               |
-| `bookingId`         | `String`               |                      |
-| `userId`            | `String`               |                      |
-| `amount`            | `Decimal`              | db `Decimal(12, 2)`  |
-| `currency`          | `String`               | default `"NGN"`      |
-| `status`            | `PaymentStatus` (enum) | default `PENDING`    |
-| `method`            | `PaymentMethod` (enum) | default `PAYSTACK`   |
-| `paystackReference` | `String?`              | unique               |
-| `paystackChannel`   | `String?`              |                      |
-| `gatewayResponse`   | `Json?`                |                      |
-| `webhookEventId`    | `String?`              | unique               |
-| `webhookReceivedAt` | `DateTime?`            |                      |
-| `paidAt`            | `DateTime?`            |                      |
-| `failedAt`          | `DateTime?`            |                      |
-| `refundedAt`        | `DateTime?`            |                      |
-| `refundAmount`      | `Decimal?`             | db `Decimal(12, 2)`  |
-| `refundReason`      | `String?`              |                      |
-| `refundedBy`        | `String?`              |                      |
-| `createdAt`         | `DateTime`             | default `now()`      |
-| `updatedAt`         | `DateTime`             | auto-updated         |
+| Column              | Type                   | Constraints                                                    |
+| ------------------- | ---------------------- | -------------------------------------------------------------- |
+| `id`                | `String`               | PK, default `uuid()`                                           |
+| `reference`         | `String`               | unique                                                         |
+| `bookingId`         | `String`               |                                                                |
+| `userId`            | `String`               |                                                                |
+| `amount`            | `Decimal`              | db `Decimal(12, 2)`                                            |
+| `currency`          | `String`               | default `"NGN"`                                                |
+| `status`            | `PaymentStatus` (enum) | default `PENDING`                                              |
+| `method`            | `PaymentMethod` (enum) | default `PAYSTACK`                                             |
+| `paystackReference` | `String?`              | unique                                                         |
+| `paystackChannel`   | `String?`              |                                                                |
+| `gatewayResponse`   | `Json?`                |                                                                |
+| `webhookEventId`    | `String?`              | unique                                                         |
+| `webhookReceivedAt` | `DateTime?`            |                                                                |
+| `paidAt`            | `DateTime?`            |                                                                |
+| `failedAt`          | `DateTime?`            |                                                                |
+| `refundedAt`        | `DateTime?`            |                                                                |
+| `refundAmount`      | `Decimal?`             | db `Decimal(12, 2)`                                            |
+| `refundReason`      | `String?`              |                                                                |
+| `refundedBy`        | `String?`              |                                                                |
+| `confirmedBy`       | `String?`              | manual payments: staff user who confirmed or recorded it       |
+| `externalReference` | `String?`              | manual payments: bank transfer reference or POS receipt number |
+| `createdAt`         | `DateTime`             | default `now()`                                                |
+| `updatedAt`         | `DateTime`             | auto-updated                                                   |
 
 Relations: `booking` → Booking; `user` → User; `invoice` → Invoice?; `refundRequest` → RefundRequest?.
 
@@ -546,6 +550,24 @@ Indexes: `@@index([status, requestedAt])`; `@@index([bookingId])`; `@@index([tra
 | `updatedAt`      | `DateTime`                  | auto-updated         |
 
 Indexes: `@@index([status, leaseExpiresAt])`; `@@index([status, nextAttemptAt])`; `@@index([eventId])`.
+
+#### PaymentSetting → `payment_settings`
+
+Single row (`id = "default"`) controlling which payment options members see at checkout.
+
+| Column                  | Type       | Constraints                                     |
+| ----------------------- | ---------- | ----------------------------------------------- |
+| `id`                    | `String`   | PK, default `"default"`, db `VarChar(64)`       |
+| `paystackEnabled`       | `Boolean`  | default `true`                                  |
+| `bankTransferEnabled`   | `Boolean`  | default `false`                                 |
+| `payAtReceptionEnabled` | `Boolean`  | default `false`                                 |
+| `bankName`              | `String?`  |                                                 |
+| `bankAccountNumber`     | `String?`  | CHECK: exactly 10 digits                        |
+| `bankAccountName`       | `String?`  |                                                 |
+| `transferWindowHours`   | `Int`      | default `24`; CHECK 1–168                       |
+| `receptionGraceMinutes` | `Int`      | default `30`; CHECK 0–240                       |
+| `updatedAt`             | `DateTime` | default `now()`, auto-updated, db `Timestamptz` |
+| `updatedBy`             | `String?`  | db `VarChar(64)`                                |
 
 ### 4.5 Discounts
 
@@ -963,20 +985,21 @@ Indexes: `@@index([status, scheduledAt])`; `@@index([status, lockedAt])`.
 
 Schema changes ship as Prisma migrations; CI and the production deploy both run `prisma migrate deploy`.
 
-| Migration                                                    | What it does                                                                                              |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `20260901000000_init`                                        | Baseline schema: identity, catalogue, bookings, payments, discounts, access, notifications, legal, outbox |
-| `20260921181500_add_auth_identity`                           | `auth_identities` for social sign-in; backfills existing Google users                                     |
-| `20260921194000_add_peedee_coin_and_refunds`                 | Coin balances, ledger and holds; refund requests                                                          |
-| `20260921210000_add_campaign_management`                     | Campaigns, executions and metrics                                                                         |
-| `20260921220000_add_extended_loyalty_settings`               | Birthday, streak, signup, expiry and referral settings                                                    |
-| `20260923200000_drop_legacy_loyalty_tables`                  | Drops `loyalty_wallets` and `loyalty_transactions` (single PeeDee ledger); non-negative balance checks    |
-| `20260923211500_add_coin_ledger_indexes`                     | Ledger query indexes                                                                                      |
-| `20260926120000_align_loyalty_defaults_with_approved_config` | Column defaults set to the approved programme values                                                      |
-| `20261002160000_migration_1a_ledger_extension`               | `webhook_events` table, `ABANDONED` payment status, active-hold partial index                             |
-| `20261002161500_phase1a_status_enums_and_columns`            | Payment, refund and webhook statuses for expiry, mismatches, reconciliation and dead letters              |
-| `20261002183000_phase3a_concurrency_and_outbox`              | Outbox leasing columns and statuses, one-open-visit index                                                 |
-| `20261003190000_phase4_user_deactivation`                    | `users.deactivatedAt`                                                                                     |
+| Migration                                                    | What it does                                                                                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `20260901000000_init`                                        | Baseline schema: identity, catalogue, bookings, payments, discounts, access, notifications, legal, outbox                                          |
+| `20260921181500_add_auth_identity`                           | `auth_identities` for social sign-in; backfills existing Google users                                                                              |
+| `20260921194000_add_peedee_coin_and_refunds`                 | Coin balances, ledger and holds; refund requests                                                                                                   |
+| `20260921210000_add_campaign_management`                     | Campaigns, executions and metrics                                                                                                                  |
+| `20260921220000_add_extended_loyalty_settings`               | Birthday, streak, signup, expiry and referral settings                                                                                             |
+| `20260923200000_drop_legacy_loyalty_tables`                  | Drops `loyalty_wallets` and `loyalty_transactions` (single PeeDee ledger); non-negative balance checks                                             |
+| `20260923211500_add_coin_ledger_indexes`                     | Ledger query indexes                                                                                                                               |
+| `20260926120000_align_loyalty_defaults_with_approved_config` | Column defaults set to the approved programme values                                                                                               |
+| `20261002160000_migration_1a_ledger_extension`               | `webhook_events` table, `ABANDONED` payment status, active-hold partial index                                                                      |
+| `20261002161500_phase1a_status_enums_and_columns`            | Payment, refund and webhook statuses for expiry, mismatches, reconciliation and dead letters                                                       |
+| `20261002183000_phase3a_concurrency_and_outbox`              | Outbox leasing columns and statuses, one-open-visit index                                                                                          |
+| `20261003190000_phase4_user_deactivation`                    | `users.deactivatedAt`                                                                                                                              |
+| `20261117120000_add_payment_options`                         | `PaymentOption` enum, `CASH` method, `bookings.paymentOption`, manual-payment columns on `transactions`, `payment_settings` with CHECK constraints |
 
 ## 7. API surface
 
@@ -1030,6 +1053,7 @@ Access is checked per route with `requirePermission`, `requireAnyPermission` or 
 | `payments:read_summary` |          |           |          |        ✓         |    ✓    |         ✓         |      ✓      |
 | `payments:read_full`    |          |           |          |                  |    ✓    |                   |      ✓      |
 | `payments:refund`       |          |           |          |                  |    ✓    |                   |      ✓      |
+| `payments:confirm`      |          |           |          |                  |    ✓    |                   |      ✓      |
 | `reports:view`          |          |           |          |        ✓         |    ✓    |         ✓         |      ✓      |
 | `reports:export`        |          |           |          |        ✓         |    ✓    |         ✓         |      ✓      |
 | `users:manage`          |          |           |          |                  |         |                   |      ✓      |
@@ -1240,24 +1264,31 @@ Extracted from the route files. "Signed in" means any authenticated user; "Any s
 
 #### `payments`
 
-| Method | Path                                              | Access                                                                        |
-| ------ | ------------------------------------------------- | ----------------------------------------------------------------------------- |
-| POST   | `/api/v1/payments/webhook`                        | Public · `verifyPaystackWebhookSignature` · raw body; Paystack HMAC signature |
-| POST   | `/api/v1/payments/initialize/:bookingId`          | Signed in                                                                     |
-| GET    | `/api/v1/payments/history`                        | Signed in                                                                     |
-| GET    | `/api/v1/payments/admin/transactions`             | `PAYMENTS_READ_FULL`                                                          |
-| GET    | `/api/v1/payments/admin/reconciliation`           | `PAYMENTS_READ_SUMMARY`                                                       |
-| GET    | `/api/v1/payments/admin/daily-summary`            | `PAYMENTS_READ_SUMMARY`                                                       |
-| GET    | `/api/v1/payments/:transactionId`                 | Signed in                                                                     |
-| POST   | `/api/v1/payments/:transactionId/verify`          | Signed in                                                                     |
-| GET    | `/api/v1/payments/:transactionId/invoice`         | Signed in                                                                     |
-| POST   | `/api/v1/payments/admin/refunds`                  | roles: OPERATIONS_ADMIN, SUPER_ADMIN                                          |
-| GET    | `/api/v1/payments/admin/refunds`                  | roles: OPERATIONS_ADMIN, FINANCE_OFFICER, SUPER_ADMIN, MANAGEMENT_VIEWER      |
-| GET    | `/api/v1/payments/admin/refunds/:id`              | roles: OPERATIONS_ADMIN, FINANCE_OFFICER, SUPER_ADMIN, MANAGEMENT_VIEWER      |
-| POST   | `/api/v1/payments/admin/refunds/:id/request-info` | `PAYMENTS_REFUND`                                                             |
-| POST   | `/api/v1/payments/admin/refunds/:id/provide-info` | roles: OPERATIONS_ADMIN, SUPER_ADMIN                                          |
-| POST   | `/api/v1/payments/admin/refunds/:id/approve`      | `PAYMENTS_REFUND`                                                             |
-| POST   | `/api/v1/payments/admin/refunds/:id/reject`       | `PAYMENTS_REFUND`                                                             |
+| Method | Path                                                           | Access                                                                                 |
+| ------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| POST   | `/api/v1/payments/webhook`                                     | Public · `verifyPaystackWebhookSignature` · raw body; Paystack HMAC signature          |
+| POST   | `/api/v1/payments/initialize/:bookingId`                       | Signed in · body `{ option?: PAYSTACK \| BANK_TRANSFER \| PAY_AT_RECEPTION }`          |
+| GET    | `/api/v1/payments/options`                                     | Signed in                                                                              |
+| POST   | `/api/v1/payments/reception/:bookingId`                        | roles: RECEPTION_OFFICER, OPERATIONS_ADMIN, SUPER_ADMIN                                |
+| GET    | `/api/v1/payments/admin/settings`                              | `PAYMENTS_READ_SUMMARY`                                                                |
+| PUT    | `/api/v1/payments/admin/settings`                              | roles: SUPER_ADMIN                                                                     |
+| GET    | `/api/v1/payments/admin/bank-transfers`                        | `PAYMENTS_CONFIRM`                                                                     |
+| POST   | `/api/v1/payments/admin/bank-transfers/:transactionId/confirm` | `PAYMENTS_CONFIRM`                                                                     |
+| POST   | `/api/v1/payments/admin/bank-transfers/:transactionId/reject`  | `PAYMENTS_CONFIRM`                                                                     |
+| GET    | `/api/v1/payments/history`                                     | Signed in                                                                              |
+| GET    | `/api/v1/payments/admin/transactions`                          | `PAYMENTS_READ_FULL`                                                                   |
+| GET    | `/api/v1/payments/admin/reconciliation`                        | `PAYMENTS_READ_SUMMARY`                                                                |
+| GET    | `/api/v1/payments/admin/daily-summary`                         | `PAYMENTS_READ_SUMMARY`                                                                |
+| GET    | `/api/v1/payments/:transactionId`                              | Signed in                                                                              |
+| POST   | `/api/v1/payments/:transactionId/verify`                       | Signed in                                                                              |
+| GET    | `/api/v1/payments/:transactionId/invoice`                      | Signed in                                                                              |
+| POST   | `/api/v1/payments/admin/refunds`                               | roles: OPERATIONS_ADMIN, SUPER_ADMIN                                                   |
+| GET    | `/api/v1/payments/admin/refunds`                               | roles: OPERATIONS_ADMIN, FINANCE_OFFICER, SUPER_ADMIN, MANAGEMENT_VIEWER               |
+| GET    | `/api/v1/payments/admin/refunds/:id`                           | roles: OPERATIONS_ADMIN, FINANCE_OFFICER, SUPER_ADMIN, MANAGEMENT_VIEWER               |
+| POST   | `/api/v1/payments/admin/refunds/:id/request-info`              | `PAYMENTS_REFUND`                                                                      |
+| POST   | `/api/v1/payments/admin/refunds/:id/provide-info`              | roles: OPERATIONS_ADMIN, SUPER_ADMIN                                                   |
+| POST   | `/api/v1/payments/admin/refunds/:id/approve`                   | `PAYMENTS_REFUND` · `payoutReference` required for bank transfer, cash and POS refunds |
+| POST   | `/api/v1/payments/admin/refunds/:id/reject`                    | `PAYMENTS_REFUND`                                                                      |
 
 #### `reports`
 

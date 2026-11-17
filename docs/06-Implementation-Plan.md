@@ -10,15 +10,16 @@
 
 ## 1. Status summary
 
-| Area                                                                           | Status                                                                                                                                      |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Core platform (identity, catalogue, booking, payments, QR check-in, reporting) | Built and deployed                                                                                                                          |
-| Production operations                                                          | Live on one VPS; payments and Google sign-in waiting on production keys ([§3](#3-operational-readiness))                                    |
-| PeeDee Coins and referrals                                                     | Built; earning on payment works, check-in rewards and referral payouts do not fire ([§4](#4-peedee-loyalty-approved-specification-vs-code)) |
-| Campaigns                                                                      | Built for manual, email-only runs; no AI component                                                                                          |
-| Staff back office                                                              | Built, with several broken actions ([03 §8](03-App-Flow.md#8-known-flow-gaps))                                                              |
-| Phase 2 (operations automation)                                                | Not started                                                                                                                                 |
-| Automated tests                                                                | 48 files, API only; CI runs them on every PR                                                                                                |
+| Area                                                                           | Status                                                                                                                                                                      |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Core platform (identity, catalogue, booking, payments, QR check-in, reporting) | Built and deployed                                                                                                                                                          |
+| Payment options                                                                | Phase 1 built: choice at checkout, bank transfer (finance-confirmed), pay at reception (cash/POS), payment settings. Monnify, Flutterwave and real walk-in passes to follow |
+| Production operations                                                          | Live on one VPS; payments and Google sign-in waiting on production keys ([§3](#3-operational-readiness))                                                                    |
+| PeeDee Coins and referrals                                                     | Built; earning on payment works, check-in rewards and referral payouts do not fire ([§4](#4-peedee-loyalty-approved-specification-vs-code))                                 |
+| Campaigns                                                                      | Built for manual, email-only runs; no AI component                                                                                                                          |
+| Staff back office                                                              | Built, with several broken actions ([03 §8](03-App-Flow.md#8-known-flow-gaps))                                                                                              |
+| Phase 2 (operations automation)                                                | Not started                                                                                                                                                                 |
+| Automated tests                                                                | 48 files, API only; CI runs them on every PR                                                                                                                                |
 
 ## 2. Delivery phases
 
@@ -42,6 +43,15 @@ Recent changes on `master`:
 | [#18](https://github.com/E310-Tech-Team/DAIH-main/pull/18)                                                             | Core project docs, part 1                                                                                                  |
 | [#19](https://github.com/E310-Tech-Team/DAIH-main/pull/19)                                                             | Every Paystack charge confirmed server-side before a booking is confirmed; QR codes generated without third-party services |
 
+### Payment options program (decided 2026-11-17)
+
+| Phase | Scope                                                                                                                                                                                   | Status                           |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| 1     | Provider-neutral checkout choice; bank transfer confirmed by finance; pay at reception (cash/POS on the kiosk); payment settings; manual refunds with payout references; hold-timer fix | Built — PR open                  |
+| 2     | Monnify automatic bank transfer (one account number per payment)                                                                                                                        | Planned — needs Monnify keys     |
+| 3     | Flutterwave card checkout                                                                                                                                                               | Planned — needs Flutterwave keys |
+| 4     | Real walk-in passes replacing the admin dashboard's "Issue Pass" mock                                                                                                                   | Planned                          |
+
 ## 3. Operational readiness
 
 | Item                                                                                                                                                                     | Status                                                     |
@@ -50,6 +60,7 @@ Recent changes on `master`:
 | All 12 database migrations applied; email templates and loyalty settings seeded                                                                                          | Done                                                       |
 | Email delivery (Resend)                                                                                                                                                  | Done                                                       |
 | **Payments:** set the real `PAYSTACK_SECRET_KEY` and `PAYSTACK_PUBLIC_KEY`; set the Paystack webhook URL to `https://api.daihworkspace.com/api/v1/payments/webhook`      | **Pending** — payments stay disabled until the key is real |
+| **Payment methods:** in Admin → Settings → Payment methods, enter DAIH's bank details (super admin) and turn on bank transfer and/or pay at reception                    | Pending — both are off until enabled                       |
 | **Google sign-in:** set `GOOGLE_CLIENT_ID` and `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, then rebuild the member app                                                               | Pending                                                    |
 | **Google OAuth verification:** Branding page privacy and terms links → `https://app.daihworkspace.com/privacy` and `/terms`, then resubmit                               | Pending                                                    |
 | **Published policies:** correct the organisation name and contact emails (Admin → Settings → Policies)                                                                   | Pending                                                    |
