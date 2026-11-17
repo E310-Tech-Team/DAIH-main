@@ -18,6 +18,7 @@ import {
   Mail,
   Headphones,
   ArrowRight,
+  Wallet,
 } from "lucide-react";
 
 export default function WorkspaceSettingsPage() {
@@ -91,6 +92,13 @@ export default function WorkspaceSettingsPage() {
             Email Templates
           </Link>
           <Link
+            href="/settings/payments"
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-[#EBE7F5] hover:bg-purple-50 text-slate-700 hover:text-[#23055c] text-xs font-bold rounded-xl shadow-xs transition-colors shrink-0"
+          >
+            <Wallet className="w-4 h-4 text-[#23055c]" />
+            Payment Methods
+          </Link>
+          <Link
             href="/staff"
             className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-[#EBE7F5] hover:bg-slate-50 text-slate-700 text-xs font-bold rounded-xl shadow-xs transition-colors shrink-0"
           >
@@ -101,7 +109,7 @@ export default function WorkspaceSettingsPage() {
       </div>
 
       {/* Quick Access Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         <Link
           href="/settings/support"
           className="group bg-gradient-to-br from-white to-purple-50/40 p-5 rounded-2xl border border-[#EBE7F5] hover:border-purple-300 hover:shadow-md transition-all flex items-start justify-between gap-4"
@@ -141,6 +149,30 @@ export default function WorkspaceSettingsPage() {
             <p className="text-xs text-slate-500 leading-relaxed">
               Visual rich-text editor for official hub contracts, Terms of
               Service, and NDPR / NDPA 2023 compliance documents.
+            </p>
+          </div>
+          <div className="w-7 h-7 rounded-lg bg-white border border-slate-200 group-hover:border-purple-300 group-hover:bg-[#23055c] group-hover:text-white flex items-center justify-center text-slate-400 shrink-0 transition-all mt-1">
+            <ArrowRight className="w-3.5 h-3.5" />
+          </div>
+        </Link>
+
+        <Link
+          href="/settings/payments"
+          className="group md:col-span-2 xl:col-span-1 bg-gradient-to-br from-white to-purple-50/40 p-5 rounded-2xl border border-[#EBE7F5] hover:border-purple-300 hover:shadow-md transition-all flex items-start justify-between gap-4"
+        >
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-purple-100/70 text-[#23055c] flex items-center justify-center">
+                <Wallet className="w-4 h-4" />
+              </div>
+              <span className="text-xs font-bold text-slate-900 group-hover:text-[#23055c] transition-colors">
+                Payment Methods
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Turn Paystack, bank transfer and pay-at-reception on or off, set
+              the hub&apos;s bank account for transfers, and how long unpaid
+              bookings are held.
             </p>
           </div>
           <div className="w-7 h-7 rounded-lg bg-white border border-slate-200 group-hover:border-purple-300 group-hover:bg-[#23055c] group-hover:text-white flex items-center justify-center text-slate-400 shrink-0 transition-all mt-1">

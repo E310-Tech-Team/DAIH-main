@@ -44,6 +44,7 @@ import {
   ReceptionShiftMetrics,
 } from "@daih/types";
 import { Html5Qrcode } from "html5-qrcode";
+import { PaymentDuePanel } from "../components/payment/PaymentDuePanel";
 
 type ScannerMode = "CAMERA" | "HARDWARE" | "MANUAL";
 
@@ -445,6 +446,16 @@ export default function ReceptionScannerPage() {
     } finally {
       setIsActionLoading(false);
     }
+  };
+
+  // Reception took payment and the booking is confirmed: re-verify so Check In appears.
+  // The notice is set afterwards because handleVerifyPass clears it when it starts.
+  const handleReceptionPaymentConfirmed = async (
+    bookingReference: string,
+    notice: string,
+  ) => {
+    await handleVerifyPass(bookingReference);
+    setLastActionNotice(notice);
   };
 
   // Clear verification
@@ -1055,6 +1066,19 @@ export default function ReceptionScannerPage() {
                   </div>
                 )}
               </div>
+
+              {/* Payment due: reception can take cash or POS for an unpaid booking */}
+              {verificationResult.rejectionReason ===
+                AccessRejectionReason.UNPAID &&
+                verificationResult.paymentDue && (
+                  <PaymentDuePanel
+                    key={verificationResult.booking.bookingId}
+                    booking={verificationResult.booking}
+                    paymentDue={verificationResult.paymentDue}
+                    officerRole={user.role}
+                    onPaymentConfirmed={handleReceptionPaymentConfirmed}
+                  />
+                )}
 
               {/* Member Profile Card (Email and Phone completely omitted for Privacy) */}
               <div className="p-4 bg-slate-50/70 rounded-xl border border-slate-200/80 flex items-center justify-between">

@@ -11,6 +11,8 @@ import { paystackClient } from "./paystack.client.js";
 import { enqueueNotification } from "../notifications/notifications.queue.js";
 import { outboxService } from "../events/outbox.service.js";
 import { Decimal } from "@prisma/client/runtime/library";
+import { MANUAL_PAYMENT_METHODS } from "./payment-options.js";
+import { paymentError } from "./payment-errors.js";
 
 export interface RaiseRefundRequestDTO {
   bookingId: string;
@@ -370,16 +372,22 @@ export class RefundService {
    * Finance Officer or Super Admin approves the refund request.
    * Executes 3-Stage Atomic Claim, Paystack gateway execution, and reason-code scoped finalization.
    */
+  /**
+   * Finance approves a refund. Card refunds go back through Paystack; bank
+   * transfer, cash and POS refunds are paid out by hand, so those need
+   * `payoutReference` (the outgoing transfer reference or cash receipt number).
+   */
   async approveRefund(
     financeOfficerUserId: string,
     refundRequestId: string,
-    workerId: string = "manual-finance-officer",
+    options: { payoutReference?: string; workerId?: string } = {},
   ): Promise<any> {
     return this.executeRefund(
       refundRequestId,
       financeOfficerUserId,
-      workerId,
+      options.workerId ?? "manual-finance-officer",
       false,
+      options.payoutReference,
     );
   }
 
@@ -406,6 +414,7 @@ export class RefundService {
     approvingUserId: string,
     workerId: string,
     isSystem: boolean,
+    payoutReference?: string,
   ): Promise<any> {
     const refund = await prisma.refundRequest.findUnique({
       where: { id: refundRequestId },
@@ -447,6 +456,51 @@ export class RefundService {
       error.code = "INVALID_REFUND_STATUS";
       error.statusCode = 400;
       throw error;
+    }
+
+    // Bank transfer, cash and POS payments never went through Paystack:
+    // finance returns the money by hand and records how.
+    const isManualPayout =
+      !!refund.transaction &&
+      MANUAL_PAYMENT_METHODS.has(refund.transaction.method);
+    if (isManualPayout && isSystem) {
+      throw paymentError(
+        409,
+        "MANUAL_PAYOUT_REQUIRED",
+        "This refund must be paid out by finance.",
+      );
+    }
+    if (isManualPayout && !payoutReference) {
+      throw paymentError(
+        400,
+        "PAYOUT_REFERENCE_REQUIRED",
+        "Pay the member back first, then enter the transfer reference or cash receipt number.",
+      );
+    }
+    // Whoever vouched that the money arrived must not also approve paying it out.
+    if (isManualPayout && refund.transaction?.confirmedBy === approvingUserId) {
+      throw paymentError(
+        403,
+        "SELF_APPROVAL_PROHIBITED",
+        "You confirmed this payment, so another finance officer must approve its refund.",
+      );
+    }
+    if (isManualPayout && payoutReference) {
+      const reused = await prisma.refundRequest.findFirst({
+        where: {
+          gatewayReference: payoutReference,
+          paystackRefundId: null,
+          id: { not: refundRequestId },
+        },
+        select: { id: true },
+      });
+      if (reused) {
+        throw paymentError(
+          409,
+          "DUPLICATE_PAYOUT_REFERENCE",
+          "This payout reference has already been recorded for another refund.",
+        );
+      }
     }
 
     // Stage 1: Atomic Claim with Global Lock Order
@@ -492,7 +546,7 @@ export class RefundService {
       ] as RefundReasonCode[]
     ).includes(refund.reasonCode);
 
-    if (!isZeroCash) {
+    if (!isZeroCash && !isManualPayout) {
       const txRef =
         refund.transaction?.paystackReference ||
         refund.transaction?.reference ||
@@ -571,8 +625,12 @@ export class RefundService {
             status: RefundStatus.PROCESSED,
             reviewedByUserId: isSystem ? null : approvingUserId,
             reviewedAt: new Date(),
-            paystackRefundId: String(paystackResult?.data?.id || ""),
-            gatewayReference: paystackResult?.data?.refund_reference || null,
+            paystackRefundId: isManualPayout
+              ? null
+              : String(paystackResult?.data?.id || ""),
+            gatewayReference: isManualPayout
+              ? (payoutReference ?? null)
+              : paystackResult?.data?.refund_reference || null,
           },
           include: {
             booking: { include: { user: true } },
@@ -590,6 +648,23 @@ export class RefundService {
               refundedAt: new Date(),
               refundAmount: refund.amount,
               refundedBy: approvingUserId,
+            },
+          });
+        }
+
+        if (isManualPayout) {
+          await tx.auditLog.create({
+            data: {
+              userId: approvingUserId,
+              action: "REFUND_PAID_OUT_MANUALLY",
+              entityType: "RefundRequest",
+              entityId: refundRequestId,
+              metadata: {
+                transactionId: refund.transactionId,
+                method: refund.transaction?.method ?? null,
+                amount: Number(refund.amount),
+                payoutReference: payoutReference ?? null,
+              },
             },
           });
         }
@@ -790,6 +865,18 @@ export class RefundService {
   }
 
   /**
+   * Replaces the included `transaction` with just its method
+   * (`transactionMethod`): bank transfer, cash and POS refunds are paid back by
+   * hand, so the approve screen must ask for a payout reference.
+   */
+  private withTransactionMethod<
+    T extends { transaction: { method: string } | null },
+  >(row: T): Omit<T, "transaction"> & { transactionMethod: string | null } {
+    const { transaction, ...rest } = row;
+    return { ...rest, transactionMethod: transaction?.method ?? null };
+  }
+
+  /**
    * Lists refund requests with optional status filter and pagination.
    */
   async listRefundRequests(filters: {
@@ -848,6 +935,7 @@ export class RefundService {
               role: true,
             },
           },
+          transaction: { select: { method: true } },
         },
         orderBy: { requestedAt: "desc" },
         skip,
@@ -857,7 +945,7 @@ export class RefundService {
     ]);
 
     return {
-      items,
+      items: items.map((item) => this.withTransactionMethod(item)),
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -902,6 +990,7 @@ export class RefundService {
             role: true,
           },
         },
+        transaction: { select: { method: true } },
       },
     });
 
@@ -912,7 +1001,7 @@ export class RefundService {
       throw error;
     }
 
-    return request;
+    return this.withTransactionMethod(request);
   }
 }
 

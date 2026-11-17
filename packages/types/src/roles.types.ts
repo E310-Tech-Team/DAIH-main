@@ -21,6 +21,8 @@ export enum Permission {
   PAYMENTS_READ_SUMMARY = "payments:read_summary",
   PAYMENTS_READ_FULL = "payments:read_full",
   PAYMENTS_REFUND = "payments:refund",
+  /** Confirm or reject bank transfers against the bank statement. */
+  PAYMENTS_CONFIRM = "payments:confirm",
   REPORTS_VIEW = "reports:view",
   REPORTS_EXPORT = "reports:export",
   USERS_MANAGE = "users:manage",
@@ -61,6 +63,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.PAYMENTS_READ_SUMMARY,
     Permission.PAYMENTS_READ_FULL,
     Permission.PAYMENTS_REFUND,
+    Permission.PAYMENTS_CONFIRM,
     Permission.REPORTS_VIEW,
     Permission.REPORTS_EXPORT,
     Permission.COINS_READ_ALL,

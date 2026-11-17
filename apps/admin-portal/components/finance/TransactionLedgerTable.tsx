@@ -19,6 +19,31 @@ import {
 import { useToast } from "@daih/ui";
 import { api } from "@daih/api-client";
 import { PaymentTransaction, PaymentStatus } from "@daih/types";
+import {
+  isManualPaymentMethod,
+  paymentMethodLabel,
+} from "../../lib/payment-labels";
+
+/**
+ * How a transaction was paid, for the member column: "Paid via card",
+ * "Paid via Bank transfer", "Method: Cash". Bank transfer, cash and POS
+ * payments store their channel as "bank_transfer", "cash" or "pos", so their
+ * readable method label is shown instead.
+ */
+function describePaymentSource(tx: {
+  method?: string | null;
+  paystackChannel?: string | null;
+}): string {
+  const methodLabel = paymentMethodLabel(tx.method);
+  if (tx.paystackChannel) {
+    const via =
+      isManualPaymentMethod(tx.method) && methodLabel
+        ? methodLabel
+        : tx.paystackChannel;
+    return `Paid via ${via}`;
+  }
+  return methodLabel ? `Method: ${methodLabel}` : "Paystack";
+}
 
 export interface FinanceTransaction {
   id: string;
@@ -124,11 +149,7 @@ export const TransactionLedgerTable: React.FC<TransactionLedgerTableProps> = ({
             year: "numeric",
           }),
           memberName: userName,
-          memberEntity: tx.paystackChannel
-            ? `Paid via ${tx.paystackChannel}`
-            : tx.method
-              ? `Method: ${tx.method}`
-              : "Paystack",
+          memberEntity: describePaymentSource(tx),
           avatarColorClass: isRefunded
             ? "bg-rose-600 text-white"
             : "bg-[#23055c] text-white",

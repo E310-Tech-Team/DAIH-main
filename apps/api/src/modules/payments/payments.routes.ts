@@ -11,8 +11,15 @@ import {
   validateQuery,
 } from "../../middleware/validate.middleware.js";
 import { paymentsController } from "./payments.controller.js";
+import { paymentOptionsController } from "./payment-options.controller.js";
 import { verifyPaystackWebhookSignature } from "./webhook.verifier.js";
 import {
+  ApproveRefundBodySchema,
+  BankTransferListQuerySchema,
+  ConfirmBankTransferBodySchema,
+  RecordReceptionPaymentBodySchema,
+  RejectBankTransferBodySchema,
+  UpdatePaymentSettingsSchema,
   InitializePaymentParamsSchema,
   InitializePaymentBodySchema,
   TransactionIdParamsSchema,
@@ -47,6 +54,68 @@ paymentsRouter.post(
   validateParams(InitializePaymentParamsSchema),
   validateBody(InitializePaymentBodySchema),
   paymentsController.initialize,
+);
+
+// Customer: payment options offered at checkout (registered before "/:transactionId")
+paymentsRouter.get(
+  "/options",
+  authenticate,
+  paymentOptionsController.getOptions,
+);
+
+// Reception: record cash or POS taken at the desk for an unpaid booking
+paymentsRouter.post(
+  "/reception/:bookingId",
+  authenticate,
+  requireRoles([
+    UserRole.RECEPTION_OFFICER,
+    UserRole.OPERATIONS_ADMIN,
+    UserRole.SUPER_ADMIN,
+  ]),
+  validateParams(InitializePaymentParamsSchema),
+  validateBody(RecordReceptionPaymentBodySchema),
+  paymentOptionsController.recordReceptionPayment,
+);
+
+// Payment settings: readable by finance, operations and management; only a
+// super admin may change them (the bank account is a fraud target)
+paymentsRouter.get(
+  "/admin/settings",
+  authenticate,
+  requirePermission(Permission.PAYMENTS_READ_SUMMARY),
+  paymentOptionsController.getSettings,
+);
+paymentsRouter.put(
+  "/admin/settings",
+  authenticate,
+  requireRoles([UserRole.SUPER_ADMIN]),
+  validateBody(UpdatePaymentSettingsSchema),
+  paymentOptionsController.updateSettings,
+);
+
+// Finance: bank transfers awaiting confirmation against the bank statement
+paymentsRouter.get(
+  "/admin/bank-transfers",
+  authenticate,
+  requirePermission(Permission.PAYMENTS_CONFIRM),
+  validateQuery(BankTransferListQuerySchema),
+  paymentOptionsController.listBankTransfers,
+);
+paymentsRouter.post(
+  "/admin/bank-transfers/:transactionId/confirm",
+  authenticate,
+  requirePermission(Permission.PAYMENTS_CONFIRM),
+  validateParams(TransactionIdParamsSchema),
+  validateBody(ConfirmBankTransferBodySchema),
+  paymentOptionsController.confirmBankTransfer,
+);
+paymentsRouter.post(
+  "/admin/bank-transfers/:transactionId/reject",
+  authenticate,
+  requirePermission(Permission.PAYMENTS_CONFIRM),
+  validateParams(TransactionIdParamsSchema),
+  validateBody(RejectBankTransferBodySchema),
+  paymentOptionsController.rejectBankTransfer,
 );
 
 // Customer: Personal Payment History
@@ -171,6 +240,7 @@ paymentsRouter.post(
   authenticate,
   requirePermission(Permission.PAYMENTS_REFUND),
   validateParams(RefundRequestIdParamsSchema),
+  validateBody(ApproveRefundBodySchema),
   paymentsController.approveRefund,
 );
 

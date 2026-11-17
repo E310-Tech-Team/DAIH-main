@@ -1,4 +1,5 @@
 import { BookingState } from "./booking.types";
+import { PaymentOption } from "./payment.types";
 
 export enum AccessRejectionReason {
   INVALID_SIGNATURE = "INVALID_SIGNATURE",
@@ -105,6 +106,14 @@ export interface VerifyAccessPassResponse {
   booking?: AccessPassDetails;
   canCheckIn?: boolean;
   canCheckOut?: boolean;
+  /** Present on UNPAID results: what reception can collect before check-in. */
+  paymentDue?: {
+    amount: number;
+    currency: string;
+    paymentOption: PaymentOption | null;
+    /** True when reception is allowed to take cash or POS for this booking. */
+    canRecordPayment: boolean;
+  };
   isReEntry?: boolean;
 }
 

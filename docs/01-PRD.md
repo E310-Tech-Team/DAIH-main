@@ -72,6 +72,8 @@ Staff accounts are created only by a super admin; every staff role must use MFA.
 
 ### 4.4 Payments — Live in code, waiting for production keys
 
+- Members choose how to pay: Paystack online, **bank transfer** to DAIH's account (confirmed by finance against the bank statement), or **pay at reception** (cash or POS recorded at the kiosk). Options are switched on per method in payment settings.
+
 - Paystack hosted checkout; every charge is confirmed with Paystack, and its amount, currency and reference must match before a booking is confirmed.
 - Invoices (`DAIH-INV-YYYY-NNNNNN`), downloadable receipts and monthly statements (PDF/CSV).
 - Paid bookings cannot be cancelled by members; refunds are full-amount, raised by operations and approved by a different person in finance.

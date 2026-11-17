@@ -10,7 +10,12 @@ import React, {
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, useAuth } from "@daih/api-client";
-import { BookingSummary, BookingState, InvoiceDTO } from "@daih/types";
+import {
+  BookingSummary,
+  BookingState,
+  InvoiceDTO,
+  PaymentOption,
+} from "@daih/types";
 import {
   Calendar,
   Clock,
@@ -42,6 +47,16 @@ import {
   downloadBookingsPdf,
   isStatementEligible,
 } from "../../../lib/statementExport";
+import {
+  AwaitingPaymentSection,
+  type PayNowError,
+} from "../../../components/payments";
+import {
+  getErrorCode,
+  getErrorMessage,
+  isHoldLapsedError,
+} from "../../../lib/apiErrors";
+import { selectAwaitingPayment } from "../../../lib/awaitingPayment";
 
 function formatDate(isoStr: string) {
   if (!isoStr) return "";
@@ -82,6 +97,7 @@ function BookingsContent() {
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState("");
   const [payingBookingId, setPayingBookingId] = useState<string | null>(null);
+  const [payNowError, setPayNowError] = useState<PayNowError | null>(null);
   const [checkingBookingId, setCheckingBookingId] = useState<string | null>(
     null,
   );
@@ -359,6 +375,7 @@ function BookingsContent() {
 
   const handlePayNow = async (bookingId: string) => {
     setPayingBookingId(bookingId);
+    setPayNowError(null);
     try {
       const callbackUrl =
         typeof window !== "undefined"
@@ -367,18 +384,32 @@ function BookingsContent() {
       const res = await api.payments.initializePayment(bookingId, callbackUrl);
       if (res.authorization_url) {
         window.location.href = res.authorization_url;
+        return; // Keep "Connecting..." while the browser leaves for Paystack.
       }
-    } catch (err: any) {
-      if (err?.code === "BOOKING_ALREADY_PAID") {
+      setPayNowError({
+        bookingId,
+        message: "We couldn't open the secure payment page. Please try again.",
+        isHoldLapsed: false,
+      });
+    } catch (err: unknown) {
+      if (getErrorCode(err) === "BOOKING_ALREADY_PAID") {
         setVerifiedSuccessMessage(
           "This booking is already paid and confirmed!",
         );
         await fetchBookings(true, { silent: true });
       } else {
-        alert(err?.message || "Failed to initialize payment gateway");
+        // Shown on the booking's card, next to the Pay now button.
+        setPayNowError({
+          bookingId,
+          message: getErrorMessage(
+            err,
+            "We couldn't start your payment. Please try again.",
+          ),
+          isHoldLapsed: isHoldLapsedError(err),
+        });
       }
-      setPayingBookingId(null);
     }
+    setPayingBookingId(null);
   };
 
   const handleCheckStatus = async (booking: BookingSummary) => {
@@ -472,6 +503,17 @@ function BookingsContent() {
 
   const displayedBookings =
     activeTab === "active" ? activeBookings : historicalBookings;
+
+  // Unpaid holds (HELD / PENDING_PAYMENT) still inside their payment window.
+  // Both tab filters above leave them out, so they get their own group at the
+  // top of the Active tab.
+  const awaitingPaymentBookings = selectAwaitingPayment(bookings, now);
+  const isShowingAwaitingPayment =
+    activeTab === "active" && awaitingPaymentBookings.length > 0;
+  const isInitialLoading = loading && !isVerifyingReturn;
+  const cancellingBooking = cancellingId
+    ? bookings.find((b) => b.id === cancellingId)
+    : undefined;
 
   return (
     <div className="space-y-8">
@@ -584,14 +626,33 @@ function BookingsContent() {
         </button>
       </div>
 
+      {/* Awaiting payment: unpaid holds, above the active passes */}
+      {isShowingAwaitingPayment && !isInitialLoading && (
+        <>
+          <AwaitingPaymentSection
+            bookings={awaitingPaymentBookings}
+            payingBookingId={payingBookingId}
+            payNowError={payNowError}
+            onPayNow={handlePayNow}
+            onCancel={setCancellingId}
+          />
+          <h2 className="sr-only">Active passes</h2>
+        </>
+      )}
+
       {/* Content */}
-      {loading && !isVerifyingReturn ? (
+      {isInitialLoading ? (
         <div className="py-20 text-center space-y-3">
           <Loader2 className="h-8 w-8 animate-spin text-[#23055c] mx-auto" />
           <p className="text-xs text-slate-500 font-semibold">
             Loading your reservations...
           </p>
         </div>
+      ) : displayedBookings.length === 0 && isShowingAwaitingPayment ? (
+        <p className="text-sm text-slate-600">
+          No active passes yet. Your pass appears here once payment is
+          confirmed.
+        </p>
       ) : displayedBookings.length === 0 ? (
         <div className="py-20 text-center max-w-sm mx-auto space-y-4">
           <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
@@ -1072,6 +1133,13 @@ function BookingsContent() {
               Are you sure you want to cancel this reservation? The slot will
               immediately be released for other members.
             </p>
+            {cancellingBooking?.paymentOption ===
+              PaymentOption.BANK_TRANSFER && (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                Already sent the transfer? Keep this booking. Our team confirms
+                it once the money reaches our account.
+              </p>
+            )}
             <div>
               <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">
                 Reason for Cancellation (Optional)

@@ -137,6 +137,11 @@ export class BookingService {
         : 0,
       discountCode: booking.discountCode || undefined,
       currency: booking.currency || "NGN",
+      cashDue:
+        booking.cashDue !== undefined && booking.cashDue !== null
+          ? Number(booking.cashDue)
+          : Number(booking.totalAmount),
+      paymentOption: booking.paymentOption ?? null,
       holdExpiresAt: booking.holdExpiresAt
         ? booking.holdExpiresAt instanceof Date
           ? booking.holdExpiresAt.toISOString()
@@ -1013,14 +1018,24 @@ export class BookingService {
 
         // 2. Lock booking
         const bookings = await tx.$queryRaw<
-          Array<{ id: string; state: string }>
+          Array<{ id: string; state: string; holdExpiresAt: Date | null }>
         >`
-          SELECT id, state FROM "bookings" WHERE id = ${bookingId} FOR UPDATE
+          SELECT id, state, "holdExpiresAt" FROM "bookings" WHERE id = ${bookingId} FOR UPDATE
         `;
         if (bookings.length === 0) return { expired: false };
         const b = bookings[0];
 
         if (!["HELD", "PENDING_PAYMENT"].includes(b.state)) {
+          return { expired: false, state: b.state };
+        }
+
+        // A delayed job can outlive a hold that was later extended (payment
+        // session, bank transfer, pay at reception): only expire once the
+        // booking's current deadline has actually passed.
+        if (
+          b.holdExpiresAt &&
+          new Date(b.holdExpiresAt).getTime() > Date.now()
+        ) {
           return { expired: false, state: b.state };
         }
 
