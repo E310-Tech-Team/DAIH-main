@@ -38,6 +38,7 @@ import {
 
 import { getWorkspaceImage } from "../../../../lib/image-utils";
 import { PdCoinRedemptionCard } from "../../../../components/book";
+import { CheckoutPaymentStep } from "../../../../components/payments";
 
 // ---- duration helpers ----
 function getPlanDurationType(
@@ -591,7 +592,9 @@ export default function PlanSelectionAndCheckoutPage() {
 
   // Hold & Checkout State
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isRedirectingPaystack, setIsRedirectingPaystack] = useState(false);
+  // Bank transfer or reception chosen: the amount is fixed, so coins are locked.
+  const [hasStartedManualCheckout, setHasStartedManualCheckout] =
+    useState(false);
   const [activeHoldId, setActiveHoldId] = useState<string | null>(null);
   const [holdExpiresAt, setHoldExpiresAt] = useState<string | null>(null);
   const [remainingHoldSeconds, setRemainingHoldSeconds] = useState<
@@ -985,25 +988,20 @@ export default function PlanSelectionAndCheckoutPage() {
     }
   };
 
-  const handleProceedToPayment = async () => {
-    if (!activeHoldId) return;
-    setIsRedirectingPaystack(true);
-    try {
-      const callbackUrl =
-        typeof window !== "undefined"
-          ? `${window.location.origin}/bookings`
-          : undefined;
-      const res = await api.payments.initializePayment(
-        activeHoldId,
-        callbackUrl,
-      );
-      if (res.authorization_url) {
-        window.location.href = res.authorization_url;
-      }
-    } catch (err: any) {
-      alert(err?.message || "Failed to initialize payment gateway");
-      setIsRedirectingPaystack(false);
-    }
+  // The hold lapsed before payment started: drop it and return to plan
+  // selection with the member's plan and dates kept. A Link to this same
+  // route would keep the reserved state, so reset it here instead.
+  const handleBookAgain = () => {
+    setConfirmed(false);
+    setActiveHoldId(null);
+    setHoldExpiresAt(null);
+    setRemainingHoldSeconds(null);
+    setBookingRef("");
+    setLoyaltyDiscountNgn(0);
+    setRedeemedCoinsCount(0);
+    setHasStartedManualCheckout(false);
+    setErrorMessage(null);
+    window.scrollTo({ top: 0 });
   };
 
   const imageSrc = getWorkspaceImage(
@@ -1069,8 +1067,9 @@ export default function PlanSelectionAndCheckoutPage() {
               Booking Reserved!
             </h2>
             <p className="text-xs text-slate-500">
-              Your 10-minute hold is secured. Complete payment to activate your
-              pass.
+              {hasStartedManualCheckout
+                ? "Your booking is held while you pay. Your pass is issued once payment is confirmed."
+                : "Your 10-minute hold is secured. Complete payment to activate your pass."}
             </p>
           </div>
           <div className="bg-[#faf9ff] rounded-xl p-4 border border-[#EBE7F5] space-y-2 text-left text-xs">
@@ -1127,8 +1126,9 @@ export default function PlanSelectionAndCheckoutPage() {
             </div>
           </div>
 
-          {/* PD Coin Loyalty Redemption Component */}
-          {activeHoldId && (
+          {/* PD Coin Loyalty Redemption Component (locked once a transfer or
+              reception payment fixes the amount) */}
+          {activeHoldId && !hasStartedManualCheckout && (
             <PdCoinRedemptionCard
               bookingId={activeHoldId}
               bookingTotalAmount={totalAmount}
@@ -1141,31 +1141,14 @@ export default function PlanSelectionAndCheckoutPage() {
             />
           )}
 
-          <div className="flex flex-col gap-3">
-            <button
-              onClick={handleProceedToPayment}
-              disabled={isRedirectingPaystack}
-              className="w-full bg-[#23055c] hover:bg-[#392271] text-white font-bold text-xs py-3.5 px-4 rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50 cursor-pointer"
-            >
-              {isRedirectingPaystack ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Connecting to secure checkout...</span>
-                </>
-              ) : (
-                <>
-                  <Lock className="h-4 w-4" />
-                  <span>Proceed to Secure Checkout</span>
-                </>
-              )}
-            </button>
-            <Link
-              href="/bookings"
-              className="w-full py-3 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition-colors text-center"
-            >
-              View in My Bookings
-            </Link>
-          </div>
+          {/* Payment option choice: Paystack, bank transfer or reception */}
+          {activeHoldId && (
+            <CheckoutPaymentStep
+              bookingId={activeHoldId}
+              onManualCheckoutStarted={() => setHasStartedManualCheckout(true)}
+              onBookAgain={handleBookAgain}
+            />
+          )}
         </div>
       </div>
     );
