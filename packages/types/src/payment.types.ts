@@ -112,6 +112,8 @@ export interface ConfirmBankTransferInput {
   /** The bank's transaction or session reference for the incoming transfer. */
   bankReference: string;
   note?: string;
+  /** Set when the member genuinely sent a different amount: it is recorded for reconciliation, not confirmed. */
+  allowAmountMismatch?: boolean;
 }
 
 export interface RejectBankTransferInput {

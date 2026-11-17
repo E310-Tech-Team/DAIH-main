@@ -53,6 +53,19 @@ export async function lockPayableBooking(
     );
   }
 
+  // The overdue sweep runs every 30 s, so a lapsed hold can still read as
+  // HELD/PENDING_PAYMENT. Never re-hold it: its slot may already be released.
+  if (
+    booking.holdExpiresAt &&
+    new Date(booking.holdExpiresAt).getTime() <= Date.now()
+  ) {
+    throw paymentError(
+      409,
+      "HOLD_LAPSED",
+      "This reservation has expired, so its slot may have been released. Please make a new booking.",
+    );
+  }
+
   const cashDue = new Prisma.Decimal(booking.cashDue);
   if (cashDue.lte(0)) {
     throw paymentError(

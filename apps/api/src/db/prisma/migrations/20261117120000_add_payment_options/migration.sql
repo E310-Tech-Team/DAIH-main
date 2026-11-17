@@ -36,3 +36,15 @@ ALTER TABLE "payment_settings" ADD CONSTRAINT "chk_payment_settings_reception_gr
   CHECK ("receptionGraceMinutes" BETWEEN 0 AND 240);
 ALTER TABLE "payment_settings" ADD CONSTRAINT "chk_payment_settings_account_number"
   CHECK ("bankAccountNumber" IS NULL OR "bankAccountNumber" ~ '^[0-9]{10}$');
+
+-- One bank credit or POS receipt can settle only one payment: stops a single
+-- statement line (or an invented reference) confirming several bookings.
+CREATE UNIQUE INDEX "uq_transactions_manual_external_reference"
+  ON "transactions" ("method", "externalReference")
+  WHERE "externalReference" IS NOT NULL AND "method" IN ('BANK_TRANSFER', 'POS_TERMINAL');
+
+-- A manual refund payout reference can be recorded only once. Gateway refunds
+-- always set "paystackRefundId", so existing rows are not affected.
+CREATE UNIQUE INDEX "uq_refund_requests_manual_payout_reference"
+  ON "refund_requests" ("gatewayReference")
+  WHERE "gatewayReference" IS NOT NULL AND "paystackRefundId" IS NULL;

@@ -1,5 +1,6 @@
 import { HoldStatus, Prisma } from "@prisma/client";
 import {
+  BankAccountDetails,
   BankTransferCheckoutResult,
   BookingState,
   ConfirmBankTransferInput,
@@ -19,7 +20,7 @@ import {
   bankTransferDeadline,
   receptionDeadline,
 } from "./payment-options.js";
-import { paymentError } from "./payment-errors.js";
+import { isUniqueViolation, paymentError } from "./payment-errors.js";
 import {
   generatePaymentReference,
   lockPayableBooking,
@@ -32,8 +33,22 @@ const CONFIRMABLE_TRANSFER_STATUSES: PaymentStatus[] = [
   PaymentStatus.EXPIRED,
   PaymentStatus.ABANDONED,
 ];
+/** Money arriving later than this after the transfer was opened is settled outside the app. */
+const LATE_CONFIRMATION_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const TRANSFER_LIST_LIMIT = 200;
 const TX_OPTIONS = { timeout: 20000, maxWait: 15000 };
+
+/** The account a member was shown when the transfer was opened (stored on the transaction). */
+function accountShownFor(
+  gatewayResponse: Prisma.JsonValue | null,
+): BankAccountDetails | null {
+  const shown = (gatewayResponse as { bankAccount?: BankAccountDetails } | null)
+    ?.bankAccount;
+  return shown?.bankName && shown.accountNumber && shown.accountName
+    ? shown
+    : null;
+}
 
 export type ReconcileOutcome = Awaited<
   ReturnType<typeof paymentsService.reconcilePaymentTransaction>
@@ -196,6 +211,8 @@ export class ManualPaymentsService {
             currency: booking.currency || "NGN",
             status: PaymentStatus.PENDING,
             method: PaymentMethod.BANK_TRANSFER,
+            // Snapshot: a later settings change must not redirect this member.
+            gatewayResponse: { bankAccount: { ...bankAccount } },
           },
         });
         await holdBookingUntil(
@@ -219,7 +236,7 @@ export class ManualPaymentsService {
       amount: Number(transfer.amount),
       currency: transfer.currency,
       expiresAt: expiresAt.toISOString(),
-      bankAccount,
+      bankAccount: accountShownFor(transfer.gatewayResponse) ?? bankAccount,
     };
   }
 
@@ -293,41 +310,78 @@ export class ManualPaymentsService {
         "You cannot confirm a payment for your own booking.",
       );
     }
+    if (
+      transfer.status !== PaymentStatus.PENDING &&
+      Date.now() - transfer.createdAt.getTime() >
+        LATE_CONFIRMATION_DAYS * DAY_MS
+    ) {
+      throw paymentError(
+        409,
+        "TRANSFER_TOO_OLD",
+        `This transfer was opened more than ${LATE_CONFIRMATION_DAYS} days ago. Settle it with the member outside the app.`,
+      );
+    }
+    // Catch typos before anything is recorded; a genuine difference must be acknowledged.
+    if (
+      toKobo(input.amountReceived) !== toKobo(transfer.amount) &&
+      !input.allowAmountMismatch
+    ) {
+      throw paymentError(
+        409,
+        "AMOUNT_MISMATCH",
+        `You entered ${formatNaira(input.amountReceived)} but ${formatNaira(transfer.amount)} is due. Check for a typo. If the member really sent a different amount, confirm again and choose to record it for reconciliation.`,
+      );
+    }
 
-    await prisma.$transaction(async (tx) => {
-      const claimed = await tx.transaction.updateMany({
-        where: {
-          id: transactionId,
-          status: { in: CONFIRMABLE_TRANSFER_STATUSES },
-        },
-        data: {
-          confirmedBy: staffUserId,
-          externalReference: input.bankReference,
-        },
-      });
-      if (claimed.count === 0) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        // Only the first attestation counts: a concurrent or repeated confirm
+        // must not overwrite who vouched for the money.
+        const claimed = await tx.transaction.updateMany({
+          where: {
+            id: transactionId,
+            status: { in: CONFIRMABLE_TRANSFER_STATUSES },
+            confirmedBy: null,
+          },
+          data: {
+            confirmedBy: staffUserId,
+            externalReference: input.bankReference,
+          },
+        });
+        if (claimed.count === 0) {
+          throw paymentError(
+            409,
+            "TRANSFER_ALREADY_SETTLED",
+            "This transfer has already been confirmed or closed.",
+          );
+        }
+        await tx.auditLog.create({
+          data: {
+            userId: staffUserId,
+            action: "BANK_TRANSFER_RECEIVED",
+            entityType: "Transaction",
+            entityId: transactionId,
+            metadata: {
+              reference: transfer.reference,
+              bankReference: input.bankReference,
+              amountReceived: input.amountReceived,
+              amountDue: Number(transfer.amount),
+              amountMismatchAcknowledged: !!input.allowAmountMismatch,
+              note: input.note ?? null,
+            },
+          },
+        });
+      }, TX_OPTIONS);
+    } catch (err: unknown) {
+      if (isUniqueViolation(err)) {
         throw paymentError(
           409,
-          "TRANSFER_ALREADY_SETTLED",
-          `This transfer has already been ${transfer.status.toLowerCase()}.`,
+          "DUPLICATE_BANK_REFERENCE",
+          "This bank reference has already been used to confirm another payment.",
         );
       }
-      await tx.auditLog.create({
-        data: {
-          userId: staffUserId,
-          action: "BANK_TRANSFER_RECEIVED",
-          entityType: "Transaction",
-          entityId: transactionId,
-          metadata: {
-            reference: transfer.reference,
-            bankReference: input.bankReference,
-            amountReceived: input.amountReceived,
-            amountDue: Number(transfer.amount),
-            note: input.note ?? null,
-          },
-        },
-      });
-    }, TX_OPTIONS);
+      throw err;
+    }
 
     const outcome = await paymentsService.reconcilePaymentTransaction(
       transactionId,
@@ -355,7 +409,9 @@ export class ManualPaymentsService {
         where: {
           id: transactionId,
           method: PaymentMethod.BANK_TRANSFER,
-          status: PaymentStatus.PENDING,
+          // Lapsed transfers can be closed too, so they stop being confirmable.
+          status: { in: CONFIRMABLE_TRANSFER_STATUSES },
+          confirmedBy: null,
         },
         data: {
           status: PaymentStatus.FAILED,
@@ -368,7 +424,7 @@ export class ManualPaymentsService {
         throw paymentError(
           409,
           "TRANSFER_NOT_PENDING",
-          "Only transfers that are awaiting confirmation can be rejected.",
+          "Only transfers that have not been confirmed or closed can be rejected.",
         );
       }
       await tx.auditLog.create({
@@ -422,64 +478,84 @@ export class ManualPaymentsService {
     }
     const now = new Date();
 
-    const recorded = await prisma.$transaction(async (tx) => {
-      const booking = await lockPayableBooking(tx, bookingId);
-      if (booking.userId === staffUserId) {
-        throw paymentError(
-          403,
-          "SELF_CONFIRMATION_PROHIBITED",
-          "You cannot record a payment for your own booking.",
-        );
-      }
-      if (
-        booking.holdExpiresAt &&
-        booking.holdExpiresAt.getTime() < now.getTime()
-      ) {
-        throw paymentError(
-          409,
-          "HOLD_LAPSED",
-          "This booking's reservation has lapsed, so its slot may have been taken. Make a new booking instead.",
-        );
-      }
-      // Cash is counted at the desk, so collect the exact amount rather than reconcile a difference later.
-      if (toKobo(input.amountReceived) !== toKobo(booking.cashDue)) {
-        throw paymentError(
-          400,
-          "AMOUNT_MISMATCH",
-          `Collect exactly ${formatNaira(booking.cashDue)} for this booking.`,
-        );
-      }
+    const recordInTransaction = () =>
+      prisma.$transaction(async (tx) => {
+        // lockPayableBooking also refuses a lapsed hold (HOLD_LAPSED).
+        const booking = await lockPayableBooking(tx, bookingId);
+        if (booking.userId === staffUserId) {
+          throw paymentError(
+            403,
+            "SELF_CONFIRMATION_PROHIBITED",
+            "You cannot record a payment for your own booking.",
+          );
+        }
+        // Cash is counted at the desk, so collect the exact amount rather than reconcile a difference later.
+        if (toKobo(input.amountReceived) !== toKobo(booking.cashDue)) {
+          throw paymentError(
+            400,
+            "AMOUNT_MISMATCH",
+            `Collect exactly ${formatNaira(booking.cashDue)} for this booking.`,
+          );
+        }
 
-      const created = await tx.transaction.create({
-        data: {
-          reference: generatePaymentReference(now),
-          bookingId,
-          userId: booking.userId,
+        // A retry after a failed confirmation reuses the row it left behind.
+        const leftover = await tx.transaction.findFirst({
+          where: {
+            bookingId,
+            status: PaymentStatus.PENDING,
+            method: input.method,
+          },
+          orderBy: { createdAt: "desc" },
+        });
+        const fields = {
           amount: booking.cashDue,
-          currency: booking.currency || "NGN",
-          status: PaymentStatus.PENDING,
-          method: input.method,
           confirmedBy: staffUserId,
           externalReference: input.receiptReference ?? null,
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          userId: staffUserId,
-          action: "RECEPTION_PAYMENT_RECORDED",
-          entityType: "Transaction",
-          entityId: created.id,
-          metadata: {
-            bookingId,
-            bookingReference: booking.reference,
-            method: input.method,
-            amount: Number(booking.cashDue),
-            receiptReference: input.receiptReference ?? null,
+        };
+        const created = leftover
+          ? await tx.transaction.update({
+              where: { id: leftover.id },
+              data: fields,
+            })
+          : await tx.transaction.create({
+              data: {
+                ...fields,
+                reference: generatePaymentReference(now),
+                bookingId,
+                userId: booking.userId,
+                currency: booking.currency || "NGN",
+                status: PaymentStatus.PENDING,
+                method: input.method,
+              },
+            });
+        await tx.auditLog.create({
+          data: {
+            userId: staffUserId,
+            action: "RECEPTION_PAYMENT_RECORDED",
+            entityType: "Transaction",
+            entityId: created.id,
+            metadata: {
+              bookingId,
+              bookingReference: booking.reference,
+              method: input.method,
+              amount: Number(booking.cashDue),
+              receiptReference: input.receiptReference ?? null,
+            },
           },
-        },
-      });
-      return created;
-    }, TX_OPTIONS);
+        });
+        return created;
+      }, TX_OPTIONS);
+
+    const recorded = await recordInTransaction().catch((err: unknown) => {
+      if (isUniqueViolation(err)) {
+        throw paymentError(
+          409,
+          "DUPLICATE_RECEIPT_REFERENCE",
+          "This POS receipt number has already been recorded for another payment.",
+        );
+      }
+      throw err;
+    });
 
     const outcome = await paymentsService.reconcilePaymentTransaction(
       recorded.id,

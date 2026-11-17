@@ -224,7 +224,11 @@ describe("Manual payments: bank transfer and pay at reception", () => {
       const outcome = await manualPaymentsService.confirmBankTransfer(
         financeId,
         transfer.transactionId,
-        { amountReceived: 4000, bankReference: "NIP-SHORT-1" },
+        {
+          amountReceived: 4000,
+          bankReference: "NIP-SHORT-1",
+          allowAmountMismatch: true,
+        },
       );
 
       expect(outcome.status).toBe(PaymentStatus.REQUIRES_RECONCILIATION);
@@ -288,6 +292,150 @@ describe("Manual payments: bank transfer and pay at reception", () => {
       );
       expect(listed?.booking.id).toBe(bookingId);
       expect(listed?.member.id).toBe(customerId);
+    });
+  });
+
+  describe("bank transfer safeguards (security review)", () => {
+    it("rejects a mistyped amount without recording anything", async () => {
+      const bookingId = await createHeldBooking(72 * HOUR);
+      const transfer = await manualPaymentsService.startBankTransfer(
+        bookingId,
+        customerId,
+      );
+
+      await expect(
+        manualPaymentsService.confirmBankTransfer(
+          financeId,
+          transfer.transactionId,
+          {
+            amountReceived: 500,
+            bankReference: "NIP-TYPO-1",
+          },
+        ),
+      ).rejects.toMatchObject({ code: "AMOUNT_MISMATCH" });
+
+      const tx = await prisma.transaction.findUniqueOrThrow({
+        where: { id: transfer.transactionId },
+      });
+      expect(tx.status).toBe(PaymentStatus.PENDING);
+      expect(tx.confirmedBy).toBeNull();
+    });
+
+    it("refuses to reuse one bank reference for two transfers", async () => {
+      const first = await manualPaymentsService.startBankTransfer(
+        await createHeldBooking(72 * HOUR),
+        customerId,
+      );
+      const second = await manualPaymentsService.startBankTransfer(
+        await createHeldBooking(72 * HOUR),
+        customerId,
+      );
+      await manualPaymentsService.confirmBankTransfer(
+        financeId,
+        first.transactionId,
+        {
+          amountReceived: 5000,
+          bankReference: "NIP-ONCE-ONLY",
+        },
+      );
+
+      await expect(
+        manualPaymentsService.confirmBankTransfer(
+          financeId,
+          second.transactionId,
+          {
+            amountReceived: 5000,
+            bankReference: "NIP-ONCE-ONLY",
+          },
+        ),
+      ).rejects.toMatchObject({ code: "DUPLICATE_BANK_REFERENCE" });
+    });
+
+    it("keeps the first attestation when a transfer is confirmed twice", async () => {
+      const transfer = await manualPaymentsService.startBankTransfer(
+        await createHeldBooking(72 * HOUR),
+        customerId,
+      );
+      await manualPaymentsService.confirmBankTransfer(
+        financeId,
+        transfer.transactionId,
+        {
+          amountReceived: 5000,
+          bankReference: "NIP-FIRST-ATTEST",
+        },
+      );
+
+      await expect(
+        manualPaymentsService.confirmBankTransfer(
+          opsId,
+          transfer.transactionId,
+          {
+            amountReceived: 5000,
+            bankReference: "NIP-SECOND-ATTEST",
+          },
+        ),
+      ).rejects.toMatchObject({ code: "TRANSFER_ALREADY_SETTLED" });
+
+      const tx = await prisma.transaction.findUniqueOrThrow({
+        where: { id: transfer.transactionId },
+      });
+      expect(tx.confirmedBy).toBe(financeId);
+      expect(tx.externalReference).toBe("NIP-FIRST-ATTEST");
+    });
+
+    it("lets finance close a lapsed transfer", async () => {
+      const transfer = await manualPaymentsService.startBankTransfer(
+        await createHeldBooking(72 * HOUR),
+        customerId,
+      );
+      await prisma.transaction.update({
+        where: { id: transfer.transactionId },
+        data: { status: PaymentStatus.EXPIRED },
+      });
+
+      await manualPaymentsService.rejectBankTransfer(
+        financeId,
+        transfer.transactionId,
+        "Money never arrived",
+      );
+
+      const tx = await prisma.transaction.findUniqueOrThrow({
+        where: { id: transfer.transactionId },
+      });
+      expect(tx.status).toBe(PaymentStatus.FAILED);
+    });
+
+    it("never re-holds a booking whose hold already lapsed", async () => {
+      const bookingId = await createHeldBooking(72 * HOUR);
+      await prisma.booking.update({
+        where: { id: bookingId },
+        data: { holdExpiresAt: new Date(Date.now() - 1000) },
+      });
+
+      await expect(
+        manualPaymentsService.startBankTransfer(bookingId, customerId),
+      ).rejects.toMatchObject({ code: "HOLD_LAPSED" });
+    });
+
+    it("keeps showing the account the member was first given", async () => {
+      const bookingId = await createHeldBooking(72 * HOUR);
+      await manualPaymentsService.startBankTransfer(bookingId, customerId);
+      await prisma.paymentSetting.update({
+        where: { id: "default" },
+        data: { bankAccountNumber: "9999999999" },
+      });
+      try {
+        const again = await manualPaymentsService.startBankTransfer(
+          bookingId,
+          customerId,
+        );
+        expect(again.bankAccount.accountNumber).toBe("0123456789");
+      } finally {
+        await prisma.paymentSetting.update({
+          where: { id: "default" },
+          data: { bankAccountNumber: "0123456789" },
+        });
+      }
     });
   });
 

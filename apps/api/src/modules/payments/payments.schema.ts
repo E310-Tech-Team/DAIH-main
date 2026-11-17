@@ -34,8 +34,29 @@ const nairaAmount = z
   .max(100_000_000, "Amount is too large")
   .multipleOf(0.01, "Amount can have at most 2 decimal places");
 
+/** Bank and account names: printable text only (no control characters). */
+const PRINTABLE_NAME = /^[\p{L}\p{N} .,'&()\-\/]+$/u;
+/** Bank, POS and payout references: letters, digits and common separators. */
+const REFERENCE_PATTERN = /^[A-Za-z0-9 \-_/.:#]+$/;
+const referenceText = (min: number) =>
+  z
+    .string()
+    .trim()
+    .min(min)
+    .max(100)
+    .regex(REFERENCE_PATTERN, "Use letters, digits and - _ / . : # only");
+
 const optionalText = (max: number) =>
-  z.string().trim().max(max).nullable().optional();
+  z
+    .string()
+    .trim()
+    .max(max)
+    .refine(
+      (v) => v === "" || PRINTABLE_NAME.test(v),
+      "Use letters, digits and basic punctuation only",
+    )
+    .nullable()
+    .optional();
 
 export const UpdatePaymentSettingsSchema = z
   .object({
@@ -81,12 +102,9 @@ export const BankTransferListQuerySchema = z.object({
 
 export const ConfirmBankTransferBodySchema = z.object({
   amountReceived: nairaAmount,
-  bankReference: z
-    .string()
-    .trim()
-    .min(4, "Enter the bank's reference for this transfer")
-    .max(100),
+  bankReference: referenceText(4),
   note: z.string().trim().max(500).optional(),
+  allowAmountMismatch: z.boolean().optional(),
 });
 
 export const RejectBankTransferBodySchema = z.object({
@@ -101,7 +119,7 @@ export const RecordReceptionPaymentBodySchema = z
   .object({
     method: z.enum([PaymentMethod.CASH, PaymentMethod.POS_TERMINAL]),
     amountReceived: nairaAmount,
-    receiptReference: z.string().trim().min(3).max(100).optional(),
+    receiptReference: referenceText(3).optional(),
   })
   .refine(
     (body) =>
@@ -115,7 +133,7 @@ export const RecordReceptionPaymentBodySchema = z
 export const ApproveRefundBodySchema = z
   .object({
     /** Required for bank transfer, cash and POS refunds, which finance pays out by hand. */
-    payoutReference: z.string().trim().min(3).max(100).optional(),
+    payoutReference: referenceText(3).optional(),
   })
   .default({});
 

@@ -173,10 +173,20 @@ export class PaymentsService {
         const cashDueDecimal = booking.cashDue;
 
         // Check existing PENDING transaction for in-flight or re-usable checkout session
+        // Choosing Paystack supersedes an open bank transfer or reception plan.
+        await tx.transaction.updateMany({
+          where: {
+            bookingId: booking.id,
+            status: PaymentStatus.PENDING,
+            method: { not: PaymentMethod.PAYSTACK },
+          },
+          data: { status: PaymentStatus.ABANDONED },
+        });
         const existingPendingTx = await tx.transaction.findFirst({
           where: {
             bookingId: booking.id,
             status: PaymentStatus.PENDING,
+            method: PaymentMethod.PAYSTACK,
           },
           orderBy: { createdAt: "desc" },
         });
