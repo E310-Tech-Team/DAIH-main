@@ -505,6 +505,39 @@ describe("Manual payments: bank transfer and pay at reception", () => {
         await setSettings({ payAtReceptionEnabled: true });
       }
     });
+
+    it("refuses to collect again while a desk payment awaits review", async () => {
+      // A short session that has already ended but is still inside its reception hold.
+      const booking = await prisma.booking.create({
+        data: {
+          reference: `DAIH-BK-MP-${RUN}-ENDED`,
+          userId: customerId,
+          resourceId,
+          startTime: new Date(Date.now() - 20 * 60 * 1000),
+          endTime: new Date(Date.now() - 5 * 60 * 1000),
+          totalAmount: new Decimal("5000.00"),
+          cashDue: new Decimal("5000.00"),
+          state: BookingState.PENDING_PAYMENT,
+          holdExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          paymentOption: PaymentOption.PAY_AT_RECEPTION,
+        },
+      });
+      bookingIds.push(booking.id);
+
+      const first = await manualPaymentsService.recordReceptionPayment(
+        receptionId,
+        booking.id,
+        { method: PaymentMethod.CASH as never, amountReceived: 5000 },
+      );
+      expect(first.confirmed).toBe(false);
+
+      await expect(
+        manualPaymentsService.recordReceptionPayment(receptionId, booking.id, {
+          method: PaymentMethod.CASH as never,
+          amountReceived: 5000,
+        }),
+      ).rejects.toMatchObject({ code: "RECEPTION_PAYMENT_UNDER_REVIEW" });
+    });
   });
 
   describe("refunds of manual payments", () => {

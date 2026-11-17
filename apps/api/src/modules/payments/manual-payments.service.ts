@@ -489,6 +489,27 @@ export class ManualPaymentsService {
             "You cannot record a payment for your own booking.",
           );
         }
+        // A desk payment already awaiting finance review must not be collected again.
+        const underReview = await tx.transaction.findFirst({
+          where: {
+            bookingId,
+            method: { in: [PaymentMethod.CASH, PaymentMethod.POS_TERMINAL] },
+            status: {
+              in: [
+                PaymentStatus.REQUIRES_RECONCILIATION,
+                PaymentStatus.FLAGGED_MISMATCH,
+              ],
+            },
+          },
+          select: { reference: true },
+        });
+        if (underReview) {
+          throw paymentError(
+            409,
+            "RECEPTION_PAYMENT_UNDER_REVIEW",
+            `A desk payment for this booking (${underReview.reference}) is awaiting finance review. Do not collect again; ask finance to resolve it.`,
+          );
+        }
         // Cash is counted at the desk, so collect the exact amount rather than reconcile a difference later.
         if (toKobo(input.amountReceived) !== toKobo(booking.cashDue)) {
           throw paymentError(

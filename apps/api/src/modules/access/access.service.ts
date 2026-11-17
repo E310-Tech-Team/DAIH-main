@@ -502,12 +502,21 @@ export class AccessService {
       const holdLive =
         booking.holdExpiresAt !== null &&
         new Date(booking.holdExpiresAt).getTime() > now.getTime();
+      // A desk payment awaiting finance review must not be collected twice.
+      const deskPaymentsUnderReview = await prisma.transaction.count({
+        where: {
+          bookingId: booking.id,
+          method: { in: ["CASH", "POS_TERMINAL"] },
+          status: { in: ["REQUIRES_RECONCILIATION", "FLAGGED_MISMATCH"] },
+        },
+      });
       // Mirrors what POST /payments/reception/:bookingId will accept.
       const canRecordPayment =
         settings.payAtReceptionEnabled &&
         cashDue > 0 &&
         holdLive &&
-        booking.state !== BookingState.DRAFT;
+        booking.state !== BookingState.DRAFT &&
+        deskPaymentsUnderReview === 0;
       return {
         valid: false,
         rejectionReason: AccessRejectionReason.UNPAID,
