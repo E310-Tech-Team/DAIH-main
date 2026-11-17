@@ -8,6 +8,14 @@ import { ZeptoMailEmailProvider } from "./providers/zeptomail.provider.js";
 import { MockEmailProvider } from "./providers/mock.provider.js";
 import { emailTemplateService } from "./email-template.service.js";
 import { config } from "../../config/env.js";
+import { sanitizeString as escapeHtml } from "../../middleware/validate.middleware.js";
+
+/** Bank account members are told to transfer to, as shown in a change alert. */
+export interface BankAccountSnapshot {
+  bankName: string | null;
+  accountNumber: string | null;
+  accountName: string | null;
+}
 
 export class EmailService {
   private primaryProvider: IEmailProvider;
@@ -184,6 +192,53 @@ export class EmailService {
       html,
       text,
     });
+  }
+
+  /**
+   * Security alert to finance and super admins when the bank account members
+   * transfer to is changed. Values are staff-typed, so every one is escaped.
+   */
+  async sendPaymentAccountChangedEmail(
+    to: string,
+    name: string,
+    change: {
+      changedBy: string;
+      changedAt: Date;
+      before: BankAccountSnapshot;
+      after: BankAccountSnapshot;
+    },
+  ): Promise<SendEmailResult> {
+    const settingsUrl = `${config.frontendUrls.admin}/settings/payments`;
+    const describe = (account: BankAccountSnapshot): string =>
+      [account.bankName, account.accountNumber, account.accountName]
+        .map((part) => part || "—")
+        .join(" · ");
+    const when = change.changedAt.toISOString();
+    const subject =
+      "Security alert: the DAIH bank account for transfers was changed";
+    const html = `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b; padding: 24px;">
+        <h2 style="color: #23055c; margin-bottom: 16px;">Bank account changed</h2>
+        <p>Hello ${escapeHtml(name)},</p>
+        <p>The bank account members are told to pay into was changed by <strong>${escapeHtml(change.changedBy)}</strong> at ${escapeHtml(when)} (UTC).</p>
+        <table style="border-collapse: collapse; margin: 16px 0; font-size: 14px;">
+          <tr><td style="padding: 4px 12px 4px 0; color: #64748b;">Before</td><td style="padding: 4px 0;">${escapeHtml(describe(change.before))}</td></tr>
+          <tr><td style="padding: 4px 12px 4px 0; color: #64748b;">After</td><td style="padding: 4px 0;"><strong>${escapeHtml(describe(change.after))}</strong></td></tr>
+        </table>
+        <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 16px; margin: 24px 0; border-radius: 4px;">
+          <p style="margin: 0; color: #991b1b; font-weight: 600;">Not expected?</p>
+          <p style="margin: 8px 0 0 0; color: #7f1d1d; font-size: 14px;">
+            Changing the payout account is a common fraud. If nobody agreed this change,
+            <a href="${settingsUrl}" style="color: #b91c1c; text-decoration: underline; font-weight: 600;">restore the correct account</a>
+            and turn off bank transfer until it is resolved.
+          </p>
+        </div>
+        <p style="color: #64748b; font-size: 12px; margin-top: 32px;">The DAIH Security Team</p>
+      </div>
+    `;
+    const text = `Hello ${name},\n\nThe bank account members are told to pay into was changed by ${change.changedBy} at ${when} (UTC).\n\nBefore: ${describe(change.before)}\nAfter: ${describe(change.after)}\n\nChanging the payout account is a common fraud. If nobody agreed this change, restore the correct account at ${settingsUrl} and turn off bank transfer until it is resolved.\n\nThe DAIH Security Team`;
+
+    return this.sendEmail({ to, subject, html, text });
   }
 
   /**

@@ -30,12 +30,19 @@ import {
   BookingState,
   PaymentStatus,
   PaymentMethod,
+  PaymentOption,
   PaymentTransaction,
   PaystackWebhookPayload,
   ReconciliationSummary,
   ReconciliationDiscrepancy,
   DailyPaymentSummary,
 } from "@daih/types";
+import { paymentSettingsService } from "./payment-settings.service.js";
+import { paymentError } from "./payment-errors.js";
+import {
+  generatePaymentReference,
+  lockPayableBooking,
+} from "./payable-booking.js";
 
 export class PaymentsService {
   constructor(
@@ -150,75 +157,20 @@ export class PaymentsService {
     userId: string,
     callbackUrl?: string,
   ) {
+    const settings = await paymentSettingsService.getValues();
+    if (!settings.paystackEnabled) {
+      throw paymentError(
+        400,
+        "PAYMENT_OPTION_UNAVAILABLE",
+        "Online payment is not available right now. Please choose another way to pay.",
+      );
+    }
+
     const initResult = await prisma.$transaction(
       async (tx) => {
-        // Serialized booking lock
-        const [booking] = await tx.$queryRaw<
-          Array<{
-            id: string;
-            reference: string;
-            userId: string;
-            state: BookingState;
-            holdExpiresAt: Date | null;
-            cashDue: Prisma.Decimal;
-            totalAmount: Prisma.Decimal;
-            currency: string;
-          }>
-        >`SELECT id, reference, "userId", state, "holdExpiresAt", "cashDue", "totalAmount", currency FROM "bookings" WHERE id = ${bookingId} FOR UPDATE`;
-
-        if (!booking) {
-          const err: any = new Error(`Booking '${bookingId}' not found`);
-          err.statusCode = 404;
-          err.code = "BOOKING_NOT_FOUND";
-          throw err;
-        }
-
-        if (booking.userId !== userId) {
-          const err: any = new Error(
-            "You are not authorized to pay for this booking",
-          );
-          err.statusCode = 403;
-          err.code = "FORBIDDEN";
-          throw err;
-        }
-
-        if (
-          booking.state !== BookingState.HELD &&
-          booking.state !== BookingState.PENDING_PAYMENT
-        ) {
-          const err: any = new Error(
-            `Cannot pay for booking in state '${booking.state}'`,
-          );
-          err.statusCode = 400;
-          err.code = "INVALID_BOOKING_STATE";
-          throw err;
-        }
-
-        const cashDueDecimal = new Prisma.Decimal(booking.cashDue);
-        if (cashDueDecimal.isZero() || cashDueDecimal.isNegative()) {
-          const err: any = new Error(
-            "Booking is fully covered by coins or discounts and does not require cash payment.",
-          );
-          err.statusCode = 400;
-          err.code = "ZERO_CASH_DUE";
-          throw err;
-        }
-
-        // Check if booking has already been paid and confirmed
-        const successfulTx = await tx.transaction.findFirst({
-          where: {
-            bookingId: booking.id,
-            status: PaymentStatus.SUCCESSFUL,
-          },
-        });
-        if (successfulTx) {
-          const err: any = new Error(
-            `This booking has already been paid and confirmed (Reference: ${successfulTx.reference}).`,
-          );
-          err.statusCode = 400;
-          err.code = "BOOKING_ALREADY_PAID";
-          throw err;
-        }
+        // Serialized booking lock and payability checks
+        const booking = await lockPayableBooking(tx, bookingId, userId);
+        const cashDueDecimal = booking.cashDue;
 
         // Check existing PENDING transaction for in-flight or re-usable checkout session
         const existingPendingTx = await tx.transaction.findFirst({
@@ -249,6 +201,7 @@ export class PaymentsService {
           ) {
             return {
               existing: true,
+              option: PaymentOption.PAYSTACK,
               authorization_url: authUrl,
               access_code: (existingPendingTx.gatewayResponse as any)
                 ?.access_code,
@@ -273,15 +226,11 @@ export class PaymentsService {
           data: {
             state: BookingState.PENDING_PAYMENT,
             holdExpiresAt: newHoldExpiresAt,
+            paymentOption: PaymentOption.PAYSTACK,
           },
         });
 
-        const datePart = new Date()
-          .toISOString()
-          .slice(0, 10)
-          .replace(/-/g, "");
-        const randomSuffix = Math.floor(10000 + Math.random() * 90000);
-        const reference = `DAIH-PAY-${datePart}-${randomSuffix}`;
+        const reference = generatePaymentReference();
         const amount = Number(cashDueDecimal);
 
         // Explicitly create and commit Transaction row with amount = booking.cashDue
@@ -340,6 +289,7 @@ export class PaymentsService {
         const authUrl = (checkTx?.gatewayResponse as any)?.authorization_url;
         if (authUrl) {
           return {
+            option: PaymentOption.PAYSTACK,
             authorization_url: authUrl,
             access_code: (checkTx?.gatewayResponse as any)?.access_code,
             reference: checkTx!.reference,
@@ -396,6 +346,7 @@ export class PaymentsService {
       });
 
       return {
+        option: PaymentOption.PAYSTACK,
         authorization_url: paystackRes.authorization_url,
         access_code: paystackRes.access_code,
         reference: paystackRes.reference,
