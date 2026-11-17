@@ -477,6 +477,31 @@ export class RefundService {
         "Pay the member back first, then enter the transfer reference or cash receipt number.",
       );
     }
+    // Whoever vouched that the money arrived must not also approve paying it out.
+    if (isManualPayout && refund.transaction?.confirmedBy === approvingUserId) {
+      throw paymentError(
+        403,
+        "SELF_APPROVAL_PROHIBITED",
+        "You confirmed this payment, so another finance officer must approve its refund.",
+      );
+    }
+    if (isManualPayout && payoutReference) {
+      const reused = await prisma.refundRequest.findFirst({
+        where: {
+          gatewayReference: payoutReference,
+          paystackRefundId: null,
+          id: { not: refundRequestId },
+        },
+        select: { id: true },
+      });
+      if (reused) {
+        throw paymentError(
+          409,
+          "DUPLICATE_PAYOUT_REFERENCE",
+          "This payout reference has already been recorded for another refund.",
+        );
+      }
+    }
 
     // Stage 1: Atomic Claim with Global Lock Order
     await prisma.$transaction(

@@ -560,6 +560,30 @@ describe("Manual payments: bank transfer and pay at reception", () => {
       expect(refund.gatewayReference).toBe("CASH-RECEIPT-0042");
       expect(refund.paystackRefundId).toBeNull();
     });
+
+    it("never lets the person who recorded a payment approve its refund", async () => {
+      const { refundId } = await confirmedCashPayment();
+
+      await expect(
+        refundService.approveRefund(receptionId, refundId, {
+          payoutReference: "CASH-SELF-1",
+        }),
+      ).rejects.toMatchObject({ code: "SELF_APPROVAL_PROHIBITED" });
+    });
+
+    it("refuses a payout reference already used for another refund", async () => {
+      const first = await confirmedCashPayment();
+      const second = await confirmedCashPayment();
+      await refundService.approveRefund(financeId, first.refundId, {
+        payoutReference: "CASH-RCPT-SHARED",
+      });
+
+      await expect(
+        refundService.approveRefund(financeId, second.refundId, {
+          payoutReference: "CASH-RCPT-SHARED",
+        }),
+      ).rejects.toMatchObject({ code: "DUPLICATE_PAYOUT_REFERENCE" });
+    });
   });
 
   describe("hold expiry", () => {
