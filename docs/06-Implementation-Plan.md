@@ -59,6 +59,8 @@ Follow-ups from the phase 1 security review and build:
 - Applying coins (`/loyalty/apply-redemption`) lowers `totalAmount` but not `cashDue`, so the member is charged the full amount — fix with the PeeDee decisions in §4.
 - The admin `/settings` page's mock "Paystack Gateway Configuration" section is misleading now that **Settings → Payment methods** exists; remove it with the rest of that mock form.
 - Kiosk: the check-in/check-out banners are cleared right after they are set (pre-existing).
+- **Before phase 2 (Monnify):** refunds route every non-manual payment to Paystack (`refund.service.ts` `executeRefund`), the refund sweeper's manual-method list is hard-coded SQL, and the reconciler matches only `paystackReference`. Add a per-provider refund dispatch and a provider-neutral reference before a second gateway goes live.
+- Code review (2026-11-24) clean-ups: split the long `manual-payments.service.ts` methods and `executeRefund` (`refund.service.ts` is over 800 lines); define the manual-method list once; share the money/date formatters and reference rules across the apps.
 
 ## 3. Operational readiness
 
