@@ -141,7 +141,7 @@ API calls:
 - `POST /access/checkin/:bookingId` (same-day re-entry is supported).
 - `POST /access/checkout/:bookingId` (Wi-Fi stays active until the booking ends).
 
-**Collecting payment.** When a scanned or searched booking is unpaid, the card shows the amount due and how the member chose to pay. Reception officers, operations admins and super admins can record **cash** or **POS** (receipt number required) with `POST /payments/reception/:bookingId`; the booking is then re-verified and Check In appears. Collection is refused while an earlier desk payment for the booking awaits finance review.
+**Collecting payment.** When a scanned or searched booking is unpaid, the card shows the amount due and how the member chose to pay. Reception officers, operations admins and super admins can record **cash** or **POS** (receipt number required) with `POST /payments/reception/:bookingId`; the booking is then re-verified and Check In appears. Collection is refused while an earlier desk payment for the booking awaits finance review. Recording a desk payment closes any bank transfer the member had opened for the booking, and finance cannot confirm a transfer once the booking is paid another way, so one booking is never paid twice.
 
 Every device reports the terminal ID `REC-GATE-01`. There is no walk-in flow on the kiosk.
 

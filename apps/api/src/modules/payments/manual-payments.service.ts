@@ -104,6 +104,54 @@ async function abandonOpenPayments(
   });
 }
 
+/**
+ * The booking was paid another way: close its unconfirmed transfers so finance
+ * cannot confirm them later and take the money twice. ABANDONED alone is not
+ * enough, because lapsed transfers stay confirmable.
+ */
+async function closeOpenTransfers(
+  tx: Prisma.TransactionClient,
+  bookingId: string,
+  reason: string,
+): Promise<void> {
+  await tx.transaction.updateMany({
+    where: {
+      bookingId,
+      method: PaymentMethod.BANK_TRANSFER,
+      status: { in: CONFIRMABLE_TRANSFER_STATUSES },
+      confirmedBy: null,
+    },
+    data: {
+      status: PaymentStatus.FAILED,
+      failedAt: new Date(),
+      gatewayResponse: { rejectedReason: reason },
+    },
+  });
+}
+
+/** Refuses when another payment has already settled the booking. */
+async function assertBookingUnpaid(
+  tx: Prisma.TransactionClient,
+  bookingId: string,
+  exceptTransactionId: string,
+): Promise<void> {
+  const paid = await tx.transaction.findFirst({
+    where: {
+      bookingId,
+      status: PaymentStatus.SUCCESSFUL,
+      id: { not: exceptTransactionId },
+    },
+    select: { reference: true },
+  });
+  if (paid) {
+    throw paymentError(
+      409,
+      "BOOKING_ALREADY_PAID",
+      `This booking was already paid another way (${paid.reference}). Do not confirm this transfer; if the member also sent money, refund it outside the app.`,
+    );
+  }
+}
+
 function toPendingTransfer(
   row: Prisma.TransactionGetPayload<{
     include: {
@@ -335,6 +383,7 @@ export class ManualPaymentsService {
 
     try {
       await prisma.$transaction(async (tx) => {
+        await assertBookingUnpaid(tx, transfer.bookingId, transactionId);
         // Only the first attestation counts: a concurrent or repeated confirm
         // must not overwrite who vouched for the money.
         const claimed = await tx.transaction.updateMany({
@@ -404,6 +453,17 @@ export class ManualPaymentsService {
     transactionId: string,
     reason: string,
   ): Promise<void> {
+    const transfer = await prisma.transaction.findUnique({
+      where: { id: transactionId },
+      select: { userId: true },
+    });
+    if (transfer?.userId === staffUserId) {
+      throw paymentError(
+        403,
+        "SELF_CONFIRMATION_PROHIBITED",
+        "You cannot reject a payment for your own booking.",
+      );
+    }
     await prisma.$transaction(async (tx) => {
       const rejected = await tx.transaction.updateMany({
         where: {
@@ -518,6 +578,8 @@ export class ManualPaymentsService {
             `Collect exactly ${formatNaira(booking.cashDue)} for this booking.`,
           );
         }
+
+        await closeOpenTransfers(tx, bookingId, "Paid at reception instead.");
 
         // A retry after a failed confirmation reuses the row it left behind.
         const leftover = await tx.transaction.findFirst({

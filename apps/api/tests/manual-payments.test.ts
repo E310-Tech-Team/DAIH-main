@@ -540,6 +540,89 @@ describe("Manual payments: bank transfer and pay at reception", () => {
     });
   });
 
+  describe("one payment per booking (code review)", () => {
+    it("closes an open bank transfer when reception collects the payment", async () => {
+      const bookingId = await createHeldBooking(72 * HOUR);
+      const transfer = await manualPaymentsService.startBankTransfer(
+        bookingId,
+        customerId,
+      );
+
+      await manualPaymentsService.recordReceptionPayment(
+        receptionId,
+        bookingId,
+        { method: PaymentMethod.CASH, amountReceived: 5000 },
+      );
+
+      const closed = await prisma.transaction.findUniqueOrThrow({
+        where: { id: transfer.transactionId },
+      });
+      expect(closed.status).toBe(PaymentStatus.FAILED);
+      const pending = await manualPaymentsService.listBankTransfers();
+      expect(
+        pending.some((p) => p.transactionId === transfer.transactionId),
+      ).toBe(false);
+      await expect(
+        manualPaymentsService.confirmBankTransfer(
+          financeId,
+          transfer.transactionId,
+          { amountReceived: 5000, bankReference: "NIP-AFTER-DESK" },
+        ),
+      ).rejects.toMatchObject({ code: "BOOKING_ALREADY_PAID" });
+    });
+
+    it("refuses to confirm a transfer once the booking was paid another way", async () => {
+      const bookingId = await createHeldBooking(72 * HOUR);
+      const transfer = await manualPaymentsService.startBankTransfer(
+        bookingId,
+        customerId,
+      );
+      await prisma.transaction.create({
+        data: {
+          reference: `DAIH-PAY-PAID-${RUN}`,
+          bookingId,
+          userId: customerId,
+          amount: new Decimal("5000.00"),
+          currency: "NGN",
+          status: PaymentStatus.SUCCESSFUL,
+          method: PaymentMethod.PAYSTACK,
+        },
+      });
+
+      await expect(
+        manualPaymentsService.confirmBankTransfer(
+          financeId,
+          transfer.transactionId,
+          { amountReceived: 5000, bankReference: "NIP-AFTER-CARD" },
+        ),
+      ).rejects.toMatchObject({ code: "BOOKING_ALREADY_PAID" });
+      const untouched = await prisma.transaction.findUniqueOrThrow({
+        where: { id: transfer.transactionId },
+      });
+      expect(untouched.confirmedBy).toBeNull();
+    });
+
+    it("never lets staff reject a transfer for their own booking", async () => {
+      const bookingId = await createHeldBooking(72 * HOUR);
+      const transfer = await manualPaymentsService.startBankTransfer(
+        bookingId,
+        customerId,
+      );
+
+      await expect(
+        manualPaymentsService.rejectBankTransfer(
+          customerId,
+          transfer.transactionId,
+          "Rejecting my own transfer",
+        ),
+      ).rejects.toMatchObject({ code: "SELF_CONFIRMATION_PROHIBITED" });
+      const untouched = await prisma.transaction.findUniqueOrThrow({
+        where: { id: transfer.transactionId },
+      });
+      expect(untouched.status).toBe(PaymentStatus.PENDING);
+    });
+  });
+
   describe("refunds of manual payments", () => {
     async function confirmedCashPayment(): Promise<{
       bookingId: string;
